@@ -1,11 +1,12 @@
 import { mkdirSync } from "node:fs";
-import { isIP } from "node:net";
 import { join } from "node:path";
 import type { ActionManifest, CapabilityResult } from "../types.ts";
 import type { CapabilityAdapter, ExecutionContext } from "./bus.server.ts";
+import { blockedHost, checkingProxy, safeUrl, type NetworkOptions } from "./browser-network.server.ts";
+export { blockedHost, safeUrl } from "./browser-network.server.ts";
 
 type PwPage = {
-  goto(url: string, options: { waitUntil: string; timeout: number }): Promise<{ status(): number } | null>;
+  goto(url: string, options: { waitUntil: string; timeout: number }): Promise<{ status(): number; headerValue(name: string): Promise<string | null> } | null>;
   url(): string; title(): Promise<string>; close(): Promise<void>; isClosed(): boolean;
   evaluate<T>(fn: (arg: number) => T, arg: number): Promise<T>;
   locator(selector: string): PwLocator; getByRole(role: string, options?: { name?: string }): PwLocator; getByText(text: string): PwLocator; getByLabel(text: string): PwLocator; getByPlaceholder(text: string): PwLocator;
@@ -17,23 +18,6 @@ type PwLocator = { first(): PwLocator; click(options: { timeout: number }): Prom
 type PwContext = { pages(): PwPage[]; newPage(): Promise<PwPage>; close(): Promise<void>; route(pattern: string, handler: (route: { request(): { url(): string }; abort(reason?: string): Promise<void>; continue(): Promise<void> }) => Promise<void>): Promise<void> };
 
 const input = (name: string, type: ActionManifest["inputs"][number]["type"], required: boolean, description: string) => ({ name, type, required, description });
-const PRIVATE = [/^127\./, /^10\./, /^192\.168\./, /^172\.(1[6-9]|2\d|3[01])\./, /^169\.254\./, /^0\./, /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./];
-/** Loopback, link-local and private-network hosts are refused so the agent browser cannot reach the Host API or the LAN. */
-export function blockedHost(host: string, allowLoopback = false): boolean {
-  const name = host.toLowerCase().replace(/^\[|\]$/g, "");
-  if (allowLoopback && (name === "127.0.0.1" || name === "localhost" || name === "::1")) return false;
-  if (name === "localhost" || name.endsWith(".localhost") || name.endsWith(".local") || name.endsWith(".internal")) return true;
-  if (isIP(name) === 4) return PRIVATE.some((pattern) => pattern.test(name));
-  if (isIP(name) === 6) return name === "::1" || name === "::" || /^f[cd]/.test(name) || /^fe[89ab]/.test(name) || name.startsWith("::ffff:");
-  return false;
-}
-export function safeUrl(raw: string, allowLoopback = false): URL {
-  let url: URL; try { url = new URL(raw); } catch { throw new Error(`Invalid URL: ${raw}`); }
-  if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(`Only http(s) URLs are allowed (got ${url.protocol}).`);
-  if (url.username || url.password) throw new Error("URLs with embedded credentials are refused.");
-  if (blockedHost(url.hostname, allowLoopback)) throw new Error(`Private or loopback host refused: ${url.hostname}`);
-  return url;
-}
 
 /**
  * Bunny-owned browser. It drives a separate browser profile under the Host data folder (never the
@@ -43,8 +27,10 @@ export class BrowserCapability implements CapabilityAdapter {
   dataDirectory: string; headless: boolean; allowLoopback: boolean;
   context: PwContext | null = null; starting: Promise<PwContext> | null = null; channel: string | null = null;
   tabs = new Map<string, PwPage>(); current: string | null = null; idle: ReturnType<typeof setTimeout> | null = null;
-  constructor(dataDirectory: string, options: { headless?: boolean; allowLoopback?: boolean } = {}) {
+  network: NetworkOptions; proxy: Awaited<ReturnType<typeof checkingProxy>> | null = null;
+  constructor(dataDirectory: string, options: { headless?: boolean; allowLoopback?: boolean; network?: NetworkOptions } = {}) {
     this.dataDirectory = dataDirectory; this.headless = options.headless ?? true; this.allowLoopback = options.allowLoopback ?? false;
+    this.network = { ...options.network, allowLoopback: this.allowLoopback };
   }
   manifest = {
     id: "browser", version: "1.0.0", description: "Isolated Bunny-owned browser profile for research and web tasks (Playwright over installed Chromium/Chrome/Edge).", locality: "local" as const, platforms: "any" as const,
@@ -73,9 +59,11 @@ export class BrowserCapability implements CapabilityAdapter {
       const { chromium } = await import("playwright") as unknown as { chromium: { launchPersistentContext(dir: string, options: Record<string, unknown>): Promise<PwContext> } };
       const profile = join(this.dataDirectory, "browser-profile"); mkdirSync(profile, { recursive: true });
       const errors: string[] = [];
+      this.proxy = await checkingProxy(this.network);
       for (const channel of [undefined, "chrome", "msedge"]) {
         try {
-          const context = await chromium.launchPersistentContext(profile, { headless: this.headless, acceptDownloads: true, ...(channel ? { channel } : {}) });
+          const context = await chromium.launchPersistentContext(profile, { headless: this.headless, acceptDownloads: true, serviceWorkers: "block", proxy: { server: this.proxy.url, bypass: "<-loopback>" },
+            args: ["--disable-quic", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp", "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1"], ...(channel ? { channel } : {}) });
           this.channel = channel ?? "bundled chromium";
           // Every request — subresources and redirects included — is checked, not just the first URL.
           await context.route("**/*", async (route) => {
@@ -86,6 +74,7 @@ export class BrowserCapability implements CapabilityAdapter {
           this.context = context; return context;
         } catch (error) { errors.push(`${channel ?? "bundled"}: ${(error instanceof Error ? error.message : String(error)).split("\n")[0]}`); }
       }
+      await this.proxy.close(); this.proxy = null;
       throw new Error(`No browser could be launched (${errors.join("; ")}).`);
     })().finally(() => { this.starting = null; });
     return this.starting;
@@ -127,6 +116,7 @@ export class BrowserCapability implements CapabilityAdapter {
       if (action === "browser.search" && !String(params.query ?? "").trim()) throw new Error("query is required.");
       const { id, page } = await this.page(params.tabId);
       const response = await page.goto(target.toString(), { waitUntil: "domcontentloaded", timeout });
+      if (await response?.headerValue("x-bunny-browser-blocked")) throw new Error("Bunny Browser blocked a private DNS destination or redirect before connection.");
       const finalUrl = safeUrl(page.url(), this.allowLoopback); // a redirect to a private host is refused too
       const facts = await evidenceOf(page);
       if (action === "browser.navigate") return { ok: true, status: "succeeded", summary: `Opened ${facts.title || finalUrl.toString()} (${response?.status() ?? "no status"}).`, output: { tabId: id, ...facts, status: response?.status() ?? null }, evidence: [`${facts.url} · "${facts.title}" · ${facts.retrievedAt}`] };
@@ -204,5 +194,6 @@ export class BrowserCapability implements CapabilityAdapter {
     if (this.idle) clearTimeout(this.idle);
     const context = this.context; this.context = null; this.tabs.clear(); this.current = null;
     await context?.close().catch(() => {});
+    await this.proxy?.close(); this.proxy = null;
   }
 }
