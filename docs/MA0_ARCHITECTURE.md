@@ -2,6 +2,8 @@
 
 Branch `ma0-mission-architecture`, baseline `ea0e803`. Companion documents: [compatibility](MA0_COMPATIBILITY.md), [security](MA0_SECURITY_MODEL.md), [capabilities](MA0_CAPABILITY_MODEL.md), [state machine](MA0_MISSION_STATE_MACHINE.md).
 
+Updated for Review 0 remediation M-A-0R; the original architecture and router remain in place. Finding evidence: [remediation report](../MA0_REMEDIATION_REPORT.md).
+
 ## 1. Old architecture (unchanged, still first-class)
 
 ```
@@ -62,6 +64,8 @@ The MissionManager never imports or calls a provider adapter. Every model-backed
 | `capabilities/local.server.ts` | filesystem, terminal, git, notifications adapters. |
 | `capabilities/process.server.ts` | Shell-free executable resolution and owned-process execution. |
 | `capabilities/browser.server.ts` | Browser Runtime (Playwright persistent context on a Bunny-owned profile). |
+| `capabilities/browser-network.server.ts` | Browser checking proxy: resolve/check every destination, then connect to the approved literal IP for HTTP, CONNECT and WebSocket traffic. |
+| `capabilities/git-merge.server.ts` | Owned Git merge transaction, independent cancellation cleanup and explicit cleanup results; no reset. |
 | `capabilities/computer.server.ts` | Computer Runtime (Windows UI Automation / user32 via PowerShell). |
 | `capabilities/connectors.server.ts` | GitHub (gh CLI, read-only) and unconfigured communication connectors + `CommunicationProvider` contract. |
 | `skills.server.ts` | Skill Library: built-in skills, versioning, verified repair, record/replay. |
@@ -88,9 +92,11 @@ Agents cannot create agents: there is no API for a step to add steps; only `miss
 
 Additions to `TaskManager` (all additive):
 
-* `submit(input, delegated?)` — the optional second argument is passed only in-process by the MissionManager. It records `task.mission = {missionId, stepId}` and may set the working directory to a Host-owned mission worktree under `<data>/worktrees`; the folder must be an approved project root, the default root, or inside `workspaceRoots`.
+* `submit(input, delegated?)` — the optional second argument is passed only in-process by the MissionManager. It records `task.mission = {missionId, stepId}` and the step's immutable `executionScope: {access: "read"|"write"}`. It may set the working directory to a Host-owned mission worktree under `<data>/worktrees`; the folder must be an approved project root, the default root, or inside `workspaceRoots`.
 * `approveDelegated(id, {missionId, stepId, authorizationId, check})` — refuses tasks that are not this step's child, re-runs `check` (envelope) at launch time, then runs the same launch path as `approve(id)` and journals `approval.delegated` (never `approval.accepted`). The task record gets `approval: {kind: "mission", authorizationId, …}`.
-* `approve(id)` — unchanged behaviour; internally it now calls the shared private `launch()`.
+* `approve(id, by?)` — legacy direct behavior and `approval.accepted` remain; the optional actor adds a remote-device audit event. All mission-child launches, including extra direct approvals, pass the installed mission scope validator. Scope/mission-link mutations are refused and adapters receive a frozen scope snapshot.
+
+For models: user approval → envelope step/session authority → step access → child execution scope → existing adapter configuration. `providerScopeViolation()` enforces child ≤ step ≤ envelope; role names are labels. Codex read uses its read-only sandbox; Claude read exposes only its Read tool. Unscoped direct tasks keep previous defaults. For deterministic work: envelope → capability decision/grant → existing capability adapter. Session counts, retry ceilings, access and provider-internal shell authority are shown before approval; provider-internal side effects remain a disclosed CLI trust boundary (M1 mitigation).
 
 ## 6. Capability Bus, Browser Runtime, Computer Runtime, Skills
 
@@ -123,9 +129,13 @@ The UI holds no orchestration state: missions, requests, progress and activity a
 
 The paired phone uses the same bridge and cookie-held device token. Allowed remotely: `mission.create` (planner-derived graphs only), `mission.get`, `mission.approve`, `mission.start`, `mission.respond`, `mission.stop`, `inbox.ack`. Everything else is workstation-only. If the Host is offline the phone cannot execute anything; the existing on-device draft queue still applies to the composer text.
 
+Desktop and phone approval grant the same persisted requested envelope. A phone cannot supply broader roots, access or session budgets. Envelope, delegated launch, extra capability and remote-device approvals have distinct journal types.
+
 ## 11. Failure and recovery
 
 Category-specific retries (`machine.ts:retryVerdict`), reroute only when another eligible provider exists, dependency failure blocks dependents, permission/budget/host-restart wait for the user, user stop never retries. On Host start the TaskManager still fails interrupted child tasks ("cannot reattach"); `MissionManager.recover()` marks their steps `failed/host_restart`, marks running capability runs `interrupted`, releases locks and puts the mission in `waiting_for_user` with a recovery note. `mission.retry` starts fresh child tasks. Nothing is resumed.
+
+Stop now blocks new scheduling while it cancels and awaits active capability cleanup, then persists a truthful Stop result. Git cleanup uses a fresh bounded signal and requires proof of transaction ownership. Provider retry/reroute retains execution scope; replanning requires a new displayed scope and approval. Old JSON records remain unchanged and missing provider authority fails closed.
 
 ## 12. Future connector model
 

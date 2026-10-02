@@ -95,6 +95,10 @@ stateDiagram-v2
 
 Bounds: per step `maxRetries` (default 2 → at most 3 attempts), per mission `budget.maxRetries`, explicit user retries capped at `2 × maxRetries + 1` attempts per step, replans capped by `maxReplans` (2). Every attempt is stored (`step.attempts`).
 
+M-A-0R also binds each model step's access and a finite total provider-session ceiling in the approved envelope (`model steps + 2 × budget.maxRetries`); cloud-call limits remain independently enforced. Retry/reroute creates children with the same access. A changed/missing displayed session scope cannot be upgraded during approval; replan revokes the envelope and asks again.
+
+Stop sets a scheduling guard, cancels only the mission's owned children/runs, awaits deterministic cleanup and persisted results, and then marks the mission stopped. Async completion callbacks cannot restart it. Git cleanup uses an independent bounded signal; failed/unproven cleanup is reported in run and Stop evidence rather than hidden or retried automatically. A cleanup failure during an ordinary capability step uses `permission_required` so the user can inspect it. These changes retain the same public state/transition tables.
+
 ## Progress
 
 `missionProgress(steps)` returns `{kind: "steps", completed, total, failed, running}`; `weighted` only when every step has an explicit positive weight. Time never contributes. An agent's own progress is shown as determinate only when its provider published a finite plan (`finitePlan`), otherwise "Indeterminate — no published plan".
@@ -102,3 +106,5 @@ Bounds: per step `maxRetries` (default 2 → at most 3 attempts), per mission `b
 ## Events (journal types)
 
 `mission.created, mission.planning, mission.planned, mission.approval_required, authorization.granted, authorization.denied, authorization.required, mission.started, mission.step.ready, mission.step.started, mission.step.child_created, mission.step.workspace, mission.step.waiting_workspace, mission.step.workspace_warning, mission.step.verifying, mission.step.completed, mission.step.failed, mission.step.retrying, mission.step.blocked, mission.permission_required, mission.waiting_for_user, mission.resumed, mission.verifying, mission.completed, mission.failed, mission.stopped, mission.retry, mission.replanning, mission.recovered, mission.configured, mission.error, capability.requested, capability.started, capability.completed, capability.failed, capability.grant_changed, skill.executed, skill.failed, skill.candidate, skill.promoted, notification.sent, trigger.created, trigger.enabled, trigger.disabled, trigger.deleted, trigger.fired, trigger.suppressed, trigger.failed`. Child tasks keep their existing `task.*`, `agent.*`, `approval.*` events, now tagged with `missionId`.
+
+M-A-0R adds `approval.mission_envelope`, `approval.additional_capability`, and `approval.remote_device`. Existing `approval.accepted` (direct task) and `approval.delegated` (mission child) retain their meanings.

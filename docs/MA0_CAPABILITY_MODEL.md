@@ -7,17 +7,19 @@ Every capability provider implements `CapabilityAdapter` (`capabilities/bus.serv
 ```ts
 manifest: { id, version, description, locality: "local"|"remote", platforms, actions: ActionManifest[], events, cost, adapter }
 health(): Promise<{ availability: "available"|"degraded"|"unavailable"|"unconfigured"|"unsupported"; detail }>
-execute(action, params, { missionId, stepId, cwd, roots, dataDirectory, signal, timeoutMs }): Promise<CapabilityResult>
+execute(action, params, { missionId, stepId, cwd, roots, dataDirectory, signal, timeoutMs, executable? }): Promise<CapabilityResult>
 riskFor?(action, params): RiskClass | null      // parameter-dependent escalation
 ```
 
 `ActionManifest`: `id` (namespaced `capability.action`), `description`, `risk` (READ/WRITE/EXECUTE/EXTERNAL_SIDE_EFFECT/DESTRUCTIVE), `sensitive`, `hardApproval`, `inputs`, `outputs`, `evidence`, `timeoutMs`, `implemented`.
 
-`CapabilityResult`: `ok`, `status` (`succeeded/failed/denied/unavailable/unconfigured/unsupported/timeout/interrupted`), `summary`, `output`, `evidence[]`, optional `artifacts[]`, `before/after`, `errorCategory`.
+`CapabilityResult`: `ok`, `status` (`succeeded/failed/denied/unavailable/unconfigured/unsupported/timeout/interrupted`), `summary`, `output`, `evidence[]`, optional `artifacts[]`, `before/after`, `errorCategory`, `cleanup: {attempted, ok, detail}`. Cleanup evidence is also persisted on the capability run.
 
 ## Bus behaviour
 
-`request()` → `capability.requested` → decision (see security model). `ask` executes nothing and returns no run (the caller raises a permission request). `deny` records a `denied` run. Non-available capabilities record `unavailable/unconfigured/unsupported` runs — never success. Allowed actions run with an `AbortController` timeout (≤30 min), are recorded in `capability_runs` (redacted parameters, summary, evidence, artifacts, duration, origin) and emit `capability.started` + `capability.completed/failed`. Mission cancellation aborts in-flight runs; aborting a terminal run ends exactly the spawned process tree (`taskkill /T` on Windows).
+`request()` → `capability.requested` → decision (see security model). `ask` executes nothing and returns no run (the caller raises a permission request). `deny` records a `denied` run. Non-available capabilities record `unavailable/unconfigured/unsupported` runs — never success. Allowed actions run with an `AbortController` timeout (≤30 min), are recorded in `capability_runs` (redacted parameters, summary, evidence, artifacts, duration, origin) and emit `capability.started` + `capability.completed/failed`. Cancellation marks the mission/step cancelled, aborts its owned in-flight processes and **awaits adapter cleanup and run persistence**. Future calls stay denied until an explicit mission retry/start clears mission cancellation. Windows process termination uses the existing owned `taskkill /T` path; OS denial is not a cleanup success.
+
+Terminal requests resolve their canonical executable/launch prefix before permission evaluation, compare that identity to the approved plan, and execute that captured identity without a second PATH lookup. Valid PATH commands remain supported; another executable with the same basename asks again. Binary replacement at the same path is outside this path-identity defense.
 
 ## Registered capabilities and what each really does
 
@@ -25,9 +27,9 @@ riskFor?(action, params): RiskClass | null      // parameter-dependent escalatio
 |---|---|---|---|
 | `filesystem` | `read` (≤1 MB), `list` (≤500), `exists`, `write` (atomic, no silent overwrite, read-back), `delete` (single file, DESTRUCTIVE) | available | Paths canonicalized (symlinks/junctions followed) and contained in approved roots. |
 | `terminal` | `exec` | available | argv only, `shell: false`; npm/npx via this Node's bundled npm CLI; `.cmd/.bat/.ps1/.js` refused; bounded output; timeout; parameter escalation. |
-| `git` | `status`, `diff` (patch artifact), `log`, `commit`, `worktree_add` (under `<data>/worktrees`, branch `bunny/<mission>-<name>`), `worktree_remove` (Bunny-owned only, no force), `merge` (`bunny/*` only, `--no-ff`; conflict → `merge --abort`, tree unchanged) | available | No push/fetch. |
+| `git` | `status`, `diff` (patch artifact), `log`, `commit`, `worktree_add` (under `<data>/worktrees`, branch `bunny/<mission>-<name>`), `worktree_remove` (Bunny-owned only, no force), `merge` (`bunny/*` only, owned `--no-ff --no-commit` transaction followed by commit) | available | Requires clean tracked/index state and no existing Git operation. Owned conflicts/failures/Stop abort with an independent signal; verified restoration and cleanup failure are reported. Untracked work and unrelated merges remain; no reset/push/fetch. |
 | `notifications` | `send` → Bunny Inbox | available | Local only; no phone push. |
-| `browser` | `navigate, search (DuckDuckGo HTML), read, extract, metadata, click, type, wait, screenshot, download, tabs` | available (installed Chrome, isolated profile) | DOM/accessibility locators (role+name, label, placeholder, text, CSS). Evidence: URL, title, retrieval time; `read` stores a `browser_evidence` artifact, `search` a `research_note`. |
+| `browser` | `navigate, search (DuckDuckGo HTML), read, extract, metadata, click, type, wait, screenshot, download, tabs` | available (installed Chromium-family browser, isolated profile) | DOM/accessibility locators; each connection resolves/checks all DNS answers and pins its literal destination through the owned proxy, including redirects/subresources/CONNECT/WebSockets. Loopback bypass, service workers and QUIC disabled. Evidence: URL/title/time and artifacts. |
 | `computer` (win32) | `list_windows, read_controls, focus_window, invoke_control, type (ValuePattern), capture, open_app` | available | UI Automation + user32 through `powershell.exe`; parameters passed via an environment variable, never interpolated into script text. No coordinates/keystrokes. |
 | `github` | `pr_list, issue_list, repo_view` | available (gh signed in) | `pr_create`, `comment`: contract only (`implemented: false`, hardApproval). |
 | `email` | `read`, `send` | **unconfigured** | contract only |
@@ -46,6 +48,8 @@ riskFor?(action, params): RiskClass | null      // parameter-dependent escalatio
 The planner maps known requests to skills/capabilities (zero model tokens); `localOnly` and step `local` preferences push model steps to Ollama; an exhausted external-call budget forces `localOnly` or fails the step as `budget_exceeded`. Local execution still uses CPU/GPU/RAM; "zero tokens" is not "zero compute".
 
 ## Skill Library
+
+Pending skill requests say **Allow this skill run**: matching actions may occur several times in that one execution, inside the runtime's approved folders. Other actions still ask, and the allowance clears at completion. Standalone capability/provider requests retain **Allow once**. Audit records distinguish this additional capability consent from mission envelope approval.
 
 `Skill`: `id, version, name, description, requirements, preconditions (file_exists | git_repository | capability_available), parameters, steps (semantic capability actions with ${param} templates), validations (status_succeeded | exit_code | output_contains), cleanup, provenance (builtin | recorded | repaired), status (active | candidate | retired), previousVersion, reliability (runs, successes, lastSuccessAt, lastFailureAt)`.
 

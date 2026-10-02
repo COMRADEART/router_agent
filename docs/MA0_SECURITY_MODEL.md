@@ -4,8 +4,8 @@
 
 1. One scoped approval per mission, never silent execution. A mission plans first and stops at `waiting_for_approval` showing its requested scope.
 2. Mission-delegated approval is recorded as such (`approval.delegated`, `task.approval.kind = "mission"`), never as a user click.
-3. Anything outside the envelope stops and asks (`permission_required` → Allow once / Deny).
-4. External side effects and destructive actions always ask, even inside the envelope.
+3. Anything outside delegated authority stops and asks. Capability requests offer **Allow once** for an invocation or **Allow this skill run** for matching actions in that run.
+4. Capability Bus external side effects and destructive actions ask by default, subject to the explicit grant rules below. Provider-internal actions use the separately displayed provider-session authority.
 5. Unavailable, unconfigured or unsupported capabilities report exactly that; nothing is simulated.
 
 ## Authorization envelope (`mission_authorizations`)
@@ -17,9 +17,9 @@ Derived by `scopeFor()` from the planned steps (including the concrete steps ins
 | `projectRoots` | Mission root (+ the mission's worktree folder when a step uses `isolation: "worktree"`). |
 | `riskClasses` | Subset of `READ, WRITE, EXECUTE, EXTERNAL_SIDE_EFFECT, DESTRUCTIVE` the plan needs. |
 | `capabilities` | Action ids/prefixes the plan uses. |
-| `providers` | `execution` (model steps present), optional allowlist, `localOnly`. |
+| `providers` | `execution`, allowlist, `localOnly`; `sessions.steps` binds each model step id to `read`/`write`, `maxSessions` bounds all provider sessions including retries, and `writeIncludesShell` records the write-session command authority. |
 | `filesystem.read/write` | Roots; `write` is empty unless a step writes. |
-| `terminal` | Enabled + exact command names (`npm`, `node`, …). |
+| `terminal` | Enabled + command names and canonical executable file/argv prefix captured with the displayed plan. Each invocation resolves once before the decision and launches that same identity. |
 | `git.actions` | `status, diff, log, commit, worktree, merge` as planned. |
 | `browser` / `network` / `computer` | Enabled only when planned. |
 | `budget` | Max external model calls (Fast 2, Balanced 6, Deep 12), max runtime (30/60/120 min), max retries, optional token ceiling. |
@@ -32,7 +32,7 @@ Order of evaluation:
 
 1. Contract-only action (`implemented: false`) → **deny**.
 2. Persistent grant `never_allow` → **deny**; `read_only` and the action is not READ → **deny**. (Most restrictive applicable grant wins; mission-scoped and global grants both apply.)
-3. The user allowed this exact pending request once → **allow** (only that action for that step; for a path outside the roots, the containment root is widened to that path's folder for that one request).
+3. The user approved the pending invocation → **allow** for that action. For a skill, **Allow this skill run** covers matching actions throughout the current run, while different actions still ask and filesystem/runtime containment still applies. It clears when the run finishes; later runs ask again. A standalone capability path exception adds the approved path's parent as a containment root for that invocation.
 4. Direct workstation invocation (`capability.run`, `skill.run`) → **allow**, except hard-approval, EXTERNAL_SIDE_EFFECT, DESTRUCTIVE and privacy-sensitive actions, which need `confirmed: true`.
 5. No envelope → **ask**. Revoked → **deny**. Expired → **ask**.
 6. `hardApproval` actions (calls, sending messages, PR creation, calendar changes) → **ask**, regardless of grants.
@@ -48,24 +48,42 @@ Parameter-dependent escalation: `terminal.exec` of `git reset/clean/push/rebase/
 
 ## Child model tasks
 
-`taskViolation()` re-checks every child at delegated launch: envelope not revoked/expired, provider execution approved, provider allowlist, local-only, external-call budget, working folder inside the roots. A violation leaves the child at `waiting_for_approval` and raises a `provider.execute` request; the user may approve the child directly (recorded as a normal user approval) or deny.
+The authority chain is **user approval → mission envelope → step scope → immutable child execution scope → existing provider adapter**. Role names carry no authority. A custom role with `access: read` is restricted; a Research role explicitly approved with `access: write` can write.
 
-**Limit:** inside a launched Codex/Claude session, file and command actions are performed by the provider CLI under its own sandbox/permission mode (as in the direct path). The Capability Bus does not intercept them. The envelope governs which provider runs where; it is not an OS sandbox.
+`taskViolation()` checks revocation/expiry, provider execution/allowlist/locality, external-call and total-session ceilings, roots and **child ≤ step ≤ approved session scope**. `TaskManager` persists scope at creation, refuses authority/mission-link mutations, and gives adapters a frozen scope snapshot. Its shared launch path also validates pending mission children approved directly, so an additional `provider.execute` consent cannot upgrade read to write. Retry and provider reroute retain access; replan revokes the old envelope and requires a fresh displayed approval. Approval never silently re-derives a broader plan. Older records without session authority require replanning.
+
+Codex read steps launch with `--sandbox read-only`; write and unscoped legacy tasks use `workspace-write`. Claude read steps expose only `Read` (`--tools Read`, explicit denial of Write/Edit/Bash/PowerShell, `dontAsk`, `--restricted`, no setting sources), retaining safe mode and strict MCP configuration. These flags were checked against installed Codex 0.159.0-alpha.12.1 and Claude Code 2.1.288 help; argv tests exercise the actual adapters with a Node stand-in. Claude write/unscoped legacy tasks retain the previous tools and acceptEdits configuration. Ollama remains text-only.
+
+Approval cards display roots, agent roles/access, shell authority on write steps, total sessions including retries, cloud-call/runtime limits and the provider permission boundary. Audit records distinguish `approval.accepted` (direct user task), `approval.mission_envelope`, `approval.delegated`, `approval.additional_capability` and `approval.remote_device`.
+
+**M1 residual (MITIGATED):** provider-internal file/command/external actions do not pass through the Capability Bus. Read access is restricted by provider configuration; a write session explicitly delegates provider-managed shell/tool execution, whose external effects are governed by that CLI. Bunny cannot promise a separate Capability Bus approval for those internal operations or an OS-level write jail for Claude. The UI states this. Live provider acceptance remains M-A-1 work; CLI/tool enforcement itself is a trust boundary.
+
+Direct capability/skill working directories must be plain absolute, existing directories inside registered/default roots after junction/symlink resolution. Relative, missing, file, control-character and unauthorized paths are refused; Windows UNC and alternate data stream syntax are refused. No folder is created by validation. This does not change legacy TaskManager submission.
+
+Executable pinning prevents a different same-basename path or a changed PATH from inheriting an envelope's terminal trust. It does not hash installed binaries or their libraries; replacement at the same canonical path by a workstation-level actor is a residual limitation.
 
 ## Remote devices
 
-Unchanged authentication (paired, hashed, revocable device token). Mission actions a device may call: `mission.create` (no explicit graphs), `mission.get`, `mission.approve`, `mission.start`, `mission.respond`, `mission.stop`, `inbox.ack`. Workstation-only: `mission.configure`, `mission.retry`, `mission.replan/plan`, all `capability.*`, `skill.*`, `trigger.*`. Tested in `capabilities.test.ts`.
+Unchanged authentication (paired, hashed, revocable device token). Mission actions a device may call: `mission.create` (no explicit graphs), `mission.get`, `mission.approve`, `mission.start`, `mission.respond`, `mission.stop`, `inbox.ack`. Workstation-only: `mission.configure`, `mission.retry`, `mission.replan/plan`, all `capability.*`, `skill.*`, `trigger.*`. A phone approves exactly the persisted requested scope; caller-supplied roots/session authority are ignored. Serialized HTTP approvals and remote audit provenance are tested in `capabilities.test.ts`; no provider is started by that test.
 
 ## Browser Runtime isolation
 
 * Separate persistent profile at `<data>/browser-profile`; the user's Chrome/Edge profiles, cookies and credentials are never opened. When no Playwright Chromium is installed it launches the installed Chrome or Edge **binary** with that separate profile.
-* Only `http(s)` URLs; embedded credentials refused; loopback, RFC1918, link-local (incl. 169.254.169.254), CGNAT, `.local/.internal/.localhost` hosts refused for the initial URL, the final URL after redirects, and every subresource (request routing). The Host API at 127.0.0.1:43119 is therefore unreachable.
-* **Limit:** a public hostname that DNS-resolves to a private address is not blocked (no DNS pinning).
+* Only `http(s)` URLs; embedded credentials and local hostnames refused. Chromium uses a Bunny-owned loopback checking proxy with implicit loopback bypass disabled. Every HTTP/CONNECT/WebSocket upstream connection resolves all DNS answers, rejects any blocked answer, then connects to the checked literal IP. There is no second destination lookup. Host headers and end-to-end TLS/SNI are retained.
+* Blocked addresses include loopback, unspecified, RFC1918, link-local, CGNAT, multicast, documentation/benchmark/reserved IPv4 and non-global IPv6 (including ULA, mapped IPv4, local and transitional ranges). Redirects, frames, fetches and other subresources traverse the same boundary. New connections re-check changed DNS answers.
+* Service workers and QUIC are disabled; non-proxied WebRTC UDP is disabled; destination DNS cannot bypass the proxy. A real isolated-browser test attempts local/private DNS, redirects, IPv6, subresources and rebinding against a real disposable Bunny Host: **zero requests reach that Host**, before token authorization. Public HTTP succeeds through a deterministic fixture; HTTP/CONNECT checks verify literal-IP dialing.
+* The loopback allowance and resolver/socket seams are in-process test options, never HTTP command fields. This is browser network isolation, not an OS network sandbox against a compromised browser or a malicious workstation process. Destination connection attempts from the browser itself are constrained; a public server's own server-side fetches are outside Bunny's control.
 * Typed text and file bodies are recorded only as character counts.
 
 ## Computer Runtime limits
 
 Window list (READ), control tree (READ, privacy-sensitive), focus, invoke/toggle/select/expand, set value through `ValuePattern`, screen capture (privacy-sensitive), open allowlisted apps (`notepad, calculator, paint, explorer, terminal`) optionally on a non-executable file inside the roots. No raw mouse coordinates and no synthetic keystrokes are offered. All non-READ actions are EXECUTE and need an envelope that enables computer control.
+
+## Git merge transaction and Stop
+
+`git.merge` refuses pre-existing Git operations, index locks or tracked/index changes. It captures HEAD/target/status, takes an owned sidecar lock and stages a `--no-ff --no-commit` merge with a unique MERGE_MSG marker before committing. Only matching marker, MERGE_HEAD, ORIG_HEAD, unchanged original HEAD and owned sidecar prove an unfinished merge is Bunny's. Conflict, process failure and cancellation then use bounded `git merge --abort` with a fresh signal and verify HEAD/tree/index restoration. Untracked user files remain; no reset or unrelated merge abort occurs.
+
+Capability cancellation and Mission Stop await adapter cleanup and run persistence; Stop blocks scheduling/finalization races and never retries. `cleanup: {attempted, ok, detail}` is persisted and returned, and failed cleanup appears in the mission Stop result. If ownership cannot be proven, inspection/abort fails or an early process interruption leaves changes/index.lock before ownership is established, the result reports manual attention instead of destructive cleanup. If commit wins a cancellation race, it stays committed and the result says so. A hard Host/process crash cannot guarantee cleanup; automatic destructive recovery is not added.
 
 ## Secrets
 
@@ -79,7 +97,8 @@ Created disabled; fire only if globally enabled **and** individually enabled; mi
 
 ## Known security limitations (for M-A-1)
 
-* DNS-rebinding style SSRF via public hostnames resolving to private IPs.
-* Skills with several steps of the same action: an allow-once covers each instance of that action in that skill run.
-* Provider CLI actions inside a session are outside the Capability Bus (see above).
+* Provider CLI actions inside a write session remain outside the Capability Bus; M1 is mitigated and disclosed, with live acceptance deferred.
+* **Allow this skill run** deliberately covers matching actions within that run and approved runtime roots; it is not single-operation authorization.
+* Executable identity is a canonical path plus launch prefix, not a binary/content integrity guarantee.
+* Unproven Git ownership, failed cleanup or a hard Host crash require manual attention; committed merges are never reset by cancellation.
 * Trigger `contains` matching is plain substring matching on event detail text.
