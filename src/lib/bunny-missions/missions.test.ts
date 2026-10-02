@@ -345,6 +345,28 @@ test("out-of-envelope capability asks; deny fails the step; allow-once runs only
     rmSync(outside, { force: true });
   } finally { await env.cleanup(); }
 });
+test("a child outside the envelope waits for the user; approving it launches it as a user approval", async () => {
+  const env = await setup();
+  try {
+    const view = env.missions.create({ objective: "Child", mode: "fast", origin: "workstation", steps: [model("A", "a")] });
+    const approved = env.missions.approve(view.id, "workstation", false);
+    const envelope = env.missions.store.authorization(approved.authorizationId!)!;
+    // An authorization that expired before launch: the child is routed but must not launch on the old approval.
+    env.missions.store.saveAuthorization({ ...envelope, expiresAt: Date.now() - 1 });
+    env.missions.start(env.missions.mission(view.id));
+    await until(() => env.missions.store.requests(view.id).length === 1, "provider request");
+    const request = env.missions.store.requests(view.id)[0];
+    assert.equal(request.action, "provider.execute"); assert.match(request.reason, /authorization expired/);
+    assert.equal(env.launched.length, 0, "nothing launched outside the envelope");
+    await env.missions.respond(request.id, "allow_once", "workstation");
+    await until(() => env.launched.length === 1, "launch after explicit approval");
+    const child = env.db.get(env.launched[0].task.id);
+    assert.equal(child.approval, undefined, "recorded as the user's own approval, not a delegated one");
+    assert.ok(env.db.taskEvents(child.id).some((e) => e.type === "approval.accepted"));
+    env.launched[0].finish({ ok: true, output: "done" });
+    await until(() => env.missions.mission(view.id).state === "completed", "completion");
+  } finally { await env.cleanup(); }
+});
 test("deterministic steps use zero model calls and verification is Bunny's own", async () => {
   const env = await setup();
   try {

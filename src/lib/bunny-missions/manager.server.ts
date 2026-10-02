@@ -601,7 +601,13 @@ export class MissionManager {
       return this.view(this.store.mission(mission.id));
     }
     if (request.action === "provider.execute" && step.taskId) {
-      this.tasks.approve(step.taskId); // explicit user approval of that child task
+      // Explicit user approval of that child task. If the provider stopped being eligible meanwhile,
+      // the step fails honestly instead of staying stuck behind an answered request.
+      try { this.tasks.approve(step.taskId); }
+      catch (error) {
+        const current = this.store.step(step.id);
+        if (current.state === "waiting_for_approval") this.stepFailed(this.store.mission(mission.id), this.markRunning(current, step.taskId, this.tasks.db.get(step.taskId).provider), "provider_unavailable", error instanceof Error ? error.message : String(error));
+      }
       return this.view(this.store.mission(mission.id));
     }
     if (step.pendingPhase === "verify") {
