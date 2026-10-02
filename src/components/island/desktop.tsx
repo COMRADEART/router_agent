@@ -36,6 +36,7 @@ import { Phone, Pairing } from "./phone";
 import { Settings } from "./settings";
 import { Constellation } from "./motion";
 import { activityDetail, activityLabel, isPrivateEvent } from "./motion-model";
+import { MissionsSection } from "./mission";
 
 const NAV = [
   { id: "today", label: "Home", icon: Monitor },
@@ -369,6 +370,7 @@ function Today({ now }: { now: number }) {
           Ask Bunny
         </button>
       </div>
+      <MissionsSection now={now} />
       <section className="today-section">
         <div className="section-heading">
           <h2 className="eyebrow">Active</h2>

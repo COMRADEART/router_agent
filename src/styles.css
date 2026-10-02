@@ -1,6 +1,7 @@
 @import "tailwindcss";
 @import "./components/island/bunny.css";
 @import "./components/island/motion.css";
+@import "./components/island/mission.css";
 @import "@fontsource-variable/inter/wght.css";
 
 @theme {

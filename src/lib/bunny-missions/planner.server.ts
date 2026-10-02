@@ -20,6 +20,9 @@ const MODEL_TIMEOUT: Record<Mode, number> = { fast: 10 * 60_000, balanced: 20 * 
 const ROLE: Record<TaskType, string> = { coding: "Coding", debug: "Debugging", research: "Research", writing: "Documentation", ops: "Integration", general: "Assistant" };
 const WRITE_WORDS = /\b(create|write|add|fix|implement|refactor|update|change|edit|modify|rename|delete|remove|build\s+(a|an|the)\s+\w+|generate)\b/i;
 
+/** A named file in the request ("CONTRIBUTING guide", "notes.md") means the result is a file in the project. */
+const FILE_TARGET = /\b[\w-]+\.(md|txt|json|ya?ml|ts|tsx|js|mjs|py|html|css)\b|\b(README|CONTRIBUTING|CHANGELOG|LICENSE)\b/;
+
 function draft(key: string, partial: Partial<StepDraft> & Pick<StepDraft, "role" | "objective" | "executor">): StepDraft {
   return { key, dependsOn: [], requiredCapabilities: [], reasoning: "none", access: "read", isolation: "shared", preferences: {}, providerConstraints: {}, verification: [], expectedArtifacts: [], timeoutMs: 10 * 60_000, weight: null, modelConstraint: null, ...partial };
 }
@@ -73,7 +76,7 @@ export function planMission(context: PlanContext): Plan {
     return { complexity: "simple", rationale: ["Recognised deterministic request; no reasoning model is needed (zero external-model tokens).", `${deterministic.length} skill/capability step${deterministic.length === 1 ? "" : "s"}.`], steps: deterministic };
   }
   const features = analyze(context.objective, context.mode);
-  const writes = features.task_type === "coding" || features.task_type === "debug" || WRITE_WORDS.test(context.objective);
+  const writes = features.task_type === "coding" || features.task_type === "debug" || WRITE_WORDS.test(context.objective) || FILE_TARGET.test(context.objective);
   const timeout = MODEL_TIMEOUT[context.mode];
   const level = context.mode === "fast" ? "simple" : features.complexity < 0.45 ? "simple" : features.complexity < 0.7 && context.mode !== "deep" ? "medium" : context.mode === "deep" ? "complex" : "medium";
   const local = context.localOnly ? { local: true } : {};

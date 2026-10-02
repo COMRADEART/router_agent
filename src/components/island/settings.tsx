@@ -3,11 +3,13 @@ import { Bell, ChevronRight, ShieldCheck } from "lucide-react";
 import { liveProviders, useIsland, type Appearance } from "@/store/use-island";
 import { NAMES, ProviderStatus } from "./ui";
 import { Pairing } from "./phone";
+import { MissionSettings } from "./mission";
 
 const GROUPS = [
   "General",
   "Agents",
   "Routing",
+  "Missions",
   "Projects",
   "Remote access",
   "Notifications",
@@ -240,6 +242,8 @@ export function Settings() {
                 </button>
               </Setting>
             </>
+          ) : group === "Missions" ? (
+            <MissionSettings />
           ) : group === "Projects" ? (
             <>
               <p className="caption">Project folders and preferences come from the Host.</p>

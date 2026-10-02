@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { commandBunnyHost, readBunnyHost } from "@/lib/orch/host";
 import type { HostEvent, HostSnapshot, PerformanceProfile } from "@/lib/bunny-host/contracts";
+import type { MissionSnapshot } from "@/lib/bunny-missions/types";
 import type {
   HostPresence,
   HostSample,
@@ -27,6 +28,7 @@ export type Sheet =
   | "phone"
   | "project"
   | "constellation"
+  | "missions"
   | null;
 export type TaskFilter = "all" | "running" | "completed" | "failed" | "stopped";
 export type Draft = {
@@ -97,6 +99,18 @@ type Island = Preferences & {
   revokeDevice: (id: string) => void;
   pairCode: string | null;
   localOnly: boolean;
+  /** Host-owned mission state (null until a Host that knows missions answers). */
+  missions: MissionSnapshot | null;
+  composeKind: "task" | "mission";
+  missionFocus: string | null;
+  setComposeKind: (kind: "task" | "mission") => void;
+  openMission: (id: string | null) => void;
+  approveMission: (id: string) => Promise<void>;
+  stopMission: (id: string) => Promise<void>;
+  retryMission: (id: string) => Promise<void>;
+  respondMission: (requestId: string, decision: "allow_once" | "deny") => Promise<void>;
+  ackInbox: (id: string) => void;
+  configureMissions: (patch: { enabled?: boolean; triggersEnabled?: boolean }) => void;
   hydrate: () => void;
   refreshOllama: () => Promise<void>;
   pushSample: (sample: HostSample) => void;
@@ -239,6 +253,7 @@ export const useIsland = create<Island>((set, get) => {
       cursor: Math.max(previous, snapshot.cursor),
       performance: snapshot.performance,
       remoteConfigured: snapshot.remoteConfigured,
+      missions: snapshot.missions ?? null,
       cpuWarn: snapshot.thermal?.cpuWarn ?? 90,
       gpuWarn: snapshot.thermal?.gpuWarn ?? 85,
       ollamaUp: ollama?.availability === "ready" || ollama?.availability === "busy",
@@ -250,6 +265,8 @@ export const useIsland = create<Island>((set, get) => {
     });
     for (const event of fresh)
       if (
+        // A mission's child tasks are approved and reported by the mission itself.
+        !(event.missionId && ["approval.required", "task.completed", "task.failed"].includes(event.type)) &&
         [
           "thermal.warning",
           "task.completed",
@@ -257,6 +274,10 @@ export const useIsland = create<Island>((set, get) => {
           "approval.required",
           "agent.waiting_for_input",
           "agent.waiting_for_approval",
+          "mission.approval_required",
+          "mission.permission_required",
+          "mission.completed",
+          "mission.failed",
         ].includes(event.type)
       ) {
         if (event.type === "thermal.warning") get().note(event.detail);
@@ -267,7 +288,7 @@ export const useIsland = create<Island>((set, get) => {
         )
           new Notification("Bunny-A", {
             body: event.type === "thermal.warning" ? event.detail : event.type.replaceAll(".", " "),
-            tag: event.taskId ?? event.type,
+            tag: event.taskId ?? event.missionId ?? event.type,
           });
       }
   };
@@ -320,6 +341,29 @@ export const useIsland = create<Island>((set, get) => {
     localOnly: false,
     remoteUrl: null,
     devices: [],
+    missions: null,
+    composeKind: "task",
+    missionFocus: null,
+    setComposeKind: (composeKind) => set({ composeKind }),
+    openMission: (missionFocus) => set({ missionFocus }),
+    approveMission: async (id) => {
+      await command("mission.approve", { id });
+    },
+    stopMission: async (id) => {
+      await command("mission.stop", { id });
+    },
+    retryMission: async (id) => {
+      await command("mission.retry", { id });
+    },
+    respondMission: async (requestId, decision) => {
+      await command("mission.respond", { requestId, decision });
+    },
+    ackInbox: (id) => {
+      void command("inbox.ack", { id });
+    },
+    configureMissions: (patch) => {
+      void command("mission.configure", patch);
+    },
     revokeDevice: (id) => {
       void command("device.revoke", { id });
     },
@@ -467,6 +511,15 @@ export const useIsland = create<Island>((set, get) => {
         return;
       }
       set({ submitting: true });
+      if (get().composeKind === "mission" && get().missions?.enabled) {
+        void command("mission.create", { objective: prompt.trim(), mode, projectId, localOnly })
+          .then((result) => {
+            const mission = result?.mission;
+            if (mission) set({ prompt: "", missionFocus: mission.id, sheet: "today" });
+          })
+          .finally(() => set({ submitting: false }));
+        return;
+      }
       void command("submit", {
         prompt: prompt.trim(),
         mode,

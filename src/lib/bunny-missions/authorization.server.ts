@@ -26,16 +26,18 @@ function domainAllowed(domains: string[] | "public", host: string) {
  * The scope a mission asks for, derived from its planned steps. Nothing is granted until the user
  * approves the mission; approval turns this request into a persisted envelope.
  */
-export function scopeFor(steps: Pick<MissionStep, "executor" | "requiredCapabilities" | "verification" | "scope" | "providerConstraints">[], root: string, mode: Mode, options: { localOnly?: boolean; providers?: ProviderId[] | null; budget?: Budget } = {}): ScopeRequest {
+export function scopeFor(steps: Pick<MissionStep, "executor" | "requiredCapabilities" | "verification" | "scope" | "providerConstraints">[], root: string, mode: Mode, options: { localOnly?: boolean; providers?: ProviderId[] | null; budget?: Budget; skillSteps?: (skillId: string) => { action: string; params: Record<string, unknown> }[] } = {}): ScopeRequest {
   const actions = new Set<string>(["notifications.send", "filesystem.read", "filesystem.list", "filesystem.exists"]);
   const commands = new Set<string>(); const git = new Set<GitAction>(); const risks = new Set<RiskClass>(["READ"]);
   let browser = false; let computer = false; let network = false; let execution = false; let write = false;
   for (const step of steps) {
     for (const capability of step.requiredCapabilities) actions.add(capability);
     if (step.executor.kind === "model") { execution = true; if (step.scope.access === "write") write = true; }
-    if (step.executor.kind === "capability") {
-      actions.add(step.executor.action);
-      if (step.executor.action === "terminal.exec" && typeof step.executor.params.command === "string") commands.add(commandName(step.executor.params.command));
+    // A skill asks for exactly what its own steps will do, so its commands are in the envelope up front.
+    const concrete = step.executor.kind === "capability" ? [{ action: step.executor.action, params: step.executor.params as Record<string, unknown> }] : step.executor.kind === "skill" ? options.skillSteps?.(step.executor.skillId) ?? [] : [];
+    for (const item of concrete) {
+      actions.add(item.action);
+      if (item.action === "terminal.exec" && typeof item.params.command === "string") commands.add(commandName(item.params.command));
     }
     for (const check of step.verification) if (check.kind === "command") { actions.add("terminal.exec"); commands.add(commandName(check.command)); }
     if (step.scope.access === "write") write = true;

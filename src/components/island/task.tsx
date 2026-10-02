@@ -38,6 +38,25 @@ import { useVoiceInput, VoicePanel } from "./voice";
 export function openTask(id: string) {
   useIsland.setState({ decisionTaskId: id, sheet: "task" });
 }
+/** Task / Mission switch; shown only when the Host reports missions enabled. */
+function ComposeKindToggle() {
+  const store = useIsland();
+  if (!store.missions?.enabled) return null;
+  return (
+    <div className="mode-selector compose-kind" aria-label="Request kind">
+      {(["task", "mission"] as const).map((kind) => (
+        <button
+          type="button"
+          key={kind}
+          aria-pressed={store.composeKind === kind}
+          onClick={() => store.setComposeKind(kind)}
+        >
+          {kind === "task" ? "Task" : "Mission"}
+        </button>
+      ))}
+    </div>
+  );
+}
 export function Composer({ phone = false }: { phone?: boolean }) {
   const store = useIsland();
   const providers = liveProviders(store);
@@ -54,6 +73,7 @@ export function Composer({ phone = false }: { phone?: boolean }) {
       }}
     >
       <p className="eyebrow">{phone ? "New task" : "Ask Bunny"}</p>
+      <ComposeKindToggle />
       <h2>{phone ? "What should Bunny do?" : "What do you want Bunny to do?"}</h2>
       <label className="sr-only" htmlFor="task-prompt">
         Task description
@@ -64,7 +84,11 @@ export function Composer({ phone = false }: { phone?: boolean }) {
         value={store.prompt}
         rows={4}
         maxLength={16000}
-        placeholder="Describe a task. Bunny will find the right agent."
+        placeholder={
+          store.composeKind === "mission" && store.missions?.enabled
+            ? "Describe the outcome. Bunny plans the steps and asks once before starting."
+            : "Describe a task. Bunny will find the right agent."
+        }
         onChange={(e) => store.setPrompt(e.target.value)}
         onKeyDown={(e) => {
           if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {

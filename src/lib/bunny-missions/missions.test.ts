@@ -157,6 +157,8 @@ test("planner chooses the smallest competent graph and stays bounded", () => {
     assert.equal(deterministicPlan("run tests and then build the project")!.length, 2);
     assert.deepEqual(deterministicPlan("run tests and then build the project")![1].dependsOn, ["s1"]);
     assert.equal(planMission({ ...base, objective: "Rename a variable in utils.ts", mode: "fast" }).steps.length, 1, "simple request: one step");
+    assert.equal(planMission({ ...base, objective: "Draft a CONTRIBUTING guide for this project", mode: "fast" }).steps[0].access, "write", "a named file is a write");
+    assert.equal(planMission({ ...base, objective: "Explain how the router scores providers", mode: "fast" }).steps[0].access, "read");
     const medium = planMission({ ...base, objective: "Implement input validation for the signup API handler and update the related form code, error messages and request helpers", mode: "balanced" });
     assert.ok(medium.steps.length >= 2 && medium.steps.length <= 3);
     assert.equal(medium.steps.filter((s) => s.access === "write").length, 1, "one writer");
@@ -329,6 +331,7 @@ test("out-of-envelope capability asks; deny fails the step; allow-once runs only
     assert.equal(request.action, "filesystem.write"); assert.match(request.reason, /outside the approved write scope/);
     assert.ok(env.missions.inbox.recent().some((e) => e.kind === "requires_approval" && e.requestId === request.id));
     await env.missions.respond(request.id, "deny", "workstation");
+    assert.ok(env.missions.inbox.recent().filter((e) => e.requestId === request.id).every((e) => e.acknowledgedAt), "answered requests leave the inbox");
     await until(() => ["failed"].includes(env.missions.mission(view.id).state), "failure after deny");
     assert.equal(env.missions.store.steps(view.id)[0].failure?.category, "permission_denied");
     assert.equal(env.missions.store.runs({ missionId: view.id }).filter((r) => r.action === "filesystem.write").length, 0, "nothing was written");
@@ -359,6 +362,20 @@ test("deterministic steps use zero model calls and verification is Bunny's own",
     assert.equal(done.mission.accounting.externalModelCalls, 0);
     assert.ok(done.memory.some((m) => m.kind === "verified_fact" && m.verified));
     assert.ok(done.mission.steps.every((s) => s.accounting.deterministic));
+  } finally { await env.cleanup(); }
+});
+test("a deterministic skill mission carries its own commands in the envelope and runs without extra prompts", async () => {
+  const env = await setup();
+  try {
+    writeFileSync(join(env.root, "package.json"), JSON.stringify({ scripts: { test: "node -e \"console.log('demo ok')\"" } }));
+    const view = env.missions.create({ objective: "Run the tests", mode: "fast", origin: "workstation" });
+    assert.deepEqual(view.requestedScope?.terminal, { enabled: true, commands: ["npm"] });
+    env.missions.approve(view.id, "workstation");
+    await until(() => ["completed", "failed", "waiting_for_user"].includes(env.missions.mission(view.id).state), "skill mission", 30_000);
+    assert.equal(env.missions.mission(view.id).state, "completed", JSON.stringify(env.missions.store.steps(view.id)[0].failure));
+    assert.equal(env.missions.store.requests(view.id).length, 0, "no permission prompt for what was approved");
+    assert.equal(env.launched.length, 0);
+    assert.throws(() => env.missions.create({ objective: "x", mode: "fast", origin: "workstation", steps: [{ role: "A", objective: "a", executor: { kind: "skill", skillId: "no.such.skill" } }] }).state === "failed" ? (() => { throw new Error("planning failed"); })() : null, /planning failed/);
   } finally { await env.cleanup(); }
 });
 test("verification failure triggers a bounded repair attempt with the failure in context", async () => {

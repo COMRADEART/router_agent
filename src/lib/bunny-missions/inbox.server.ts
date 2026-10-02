@@ -69,5 +69,15 @@ export class Inbox {
     this.store.saveInbox(next);
     return next;
   }
+  /** Marks attention items as handled once the thing they asked about was answered or ended. */
+  resolve(missionId: string, filter: { requestId?: string; kinds?: InboxKind[] } = {}) {
+    const kinds = filter.kinds ?? ["requires_approval", "requires_attention"];
+    for (const entry of this.store.inbox(200, true)) {
+      if (entry.missionId !== missionId || !kinds.includes(entry.kind)) continue;
+      if (filter.requestId && entry.requestId && entry.requestId !== filter.requestId) continue;
+      if (filter.requestId && !entry.requestId && entry.kind === "requires_approval") continue;
+      this.store.saveInbox({ ...entry, acknowledgedAt: Date.now() });
+    }
+  }
   recent(limit = 40) { return this.store.inbox(limit); }
 }

@@ -202,8 +202,12 @@ export class MissionManager {
       }));
       const problem = validateGraph([...kept, ...steps], this.cached.limits);
       if (problem) throw new Error(problem);
+      for (const step of steps) {
+        if (step.executor.kind === "skill") { const skill = this.skills.get(step.executor.skillId); if (skill.status !== "active") throw new Error(`Skill ${skill.id} is an unverified candidate.`); }
+        if (step.executor.kind === "capability" && !this.bus.find(step.executor.action)) throw new Error(`Unknown capability action ${step.executor.action}.`);
+      }
       this.store.replaceSteps(current.id, [...kept, ...steps]);
-      const requestedScope = scopeFor(steps, current.root, current.mode, { localOnly: current.providerConstraints.localOnly, providers: current.providerConstraints.allow ?? null });
+      const requestedScope = scopeFor(steps, current.root, current.mode, { localOnly: current.providerConstraints.localOnly, providers: current.providerConstraints.allow ?? null, skillSteps: (id) => this.skills.get(id).steps });
       current = this.setMission(current, {
         state: "waiting_for_approval", requestedScope, capabilityRequirements: requestedScope.capabilities, budget: requestedScope.budget,
         verificationRequired: steps.some((step) => step.verification.length > 0),
@@ -228,6 +232,7 @@ export class MissionManager {
     this.store.saveAuthorization(envelope);
     this.memory.record(id, "user_decision", "Mission approved", `${by} approved ${envelope.riskClasses.join("/")} in ${envelope.projectRoots.join(", ")} until ${new Date(envelope.expiresAt).toISOString()}.`, `user:${by}`, true);
     mission = this.setMission(mission, { state: "ready", authorizationId: envelope.id }, "authorization.granted", `Mission authorization ${envelope.id} granted by ${by}: roots ${envelope.projectRoots.join(", ")}; ${envelope.riskClasses.join(", ")}; terminal [${envelope.terminal.commands.join(", ")}]; git [${envelope.git.actions.join(", ")}]; browser ${envelope.browser.enabled ? "on" : "off"}; computer ${envelope.computer.enabled ? "on" : "off"}; expires ${new Date(envelope.expiresAt).toISOString()}.`);
+    this.inbox.resolve(id, { kinds: ["requires_approval"] });
     if (start) mission = this.start(mission);
     return this.view(mission);
   }
@@ -583,6 +588,8 @@ export class MissionManager {
     const step = this.store.step(request.stepId);
     if (step.state !== "waiting_for_approval" || step.pendingRequestId !== requestId) throw new Error("The step is no longer waiting for this request.");
     this.store.saveRequest({ ...request, resolvedAt: Date.now(), resolution: decision, resolvedBy: by });
+    this.inbox.resolve(request.missionId, { requestId });
+    this.inbox.resolve(request.missionId, { kinds: ["requires_attention"] });
     this.memory.record(request.missionId, "user_decision", `${request.action} ${decision === "allow_once" ? "allowed once" : "denied"}`, `${by}: ${request.reason}`, `user:${by}`, true);
     let mission = this.store.mission(request.missionId);
     if (mission.state === "waiting_for_user") mission = this.setMission(mission, { state: "running" }, "mission.resumed", `${by} answered request ${requestId}.`);
@@ -630,6 +637,7 @@ export class MissionManager {
     }
     for (const request of this.store.requests(id)) if (!request.resolvedAt) this.store.saveRequest({ ...request, resolvedAt: Date.now(), resolution: "deny", resolvedBy: `${by} (mission stopped)` });
     this.workspace.releaseMission(id);
+    this.inbox.resolve(id);
     const stopped = this.setMission(this.store.mission(id), { state: "stopped", finishedAt: Date.now(), failure: { category: "user_stopped", detail: `Stopped by ${by}.`, stepId: null }, accounting: this.accounting(id) }, "mission.stopped", `Mission "${mission.title}" stopped by ${by}; child tasks stopped, nothing will be retried.`);
     return this.view(stopped);
   }
