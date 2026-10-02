@@ -47,7 +47,7 @@ Total: 362 tests (baseline 320), 0 failures.
 * **Workspace safety** — persisted shared/exclusive locks with nested-path conflicts; writers on one workspace serialized; git worktree isolation per step (`isolation: "worktree"`).
 * **Verification** — Bunny's own checks: TaskManager VerifySpec, file exists/contains, command exit code, non-empty git diff, artifact present. Mission result reports verified vs. unverified steps separately.
 * **Failure/retry/recovery** — category-specific bounded retries, reroute only when an alternative provider exists, dependency blocking, mission stop with child cancellation (only its own children), Host-restart recovery that never claims resumption.
-* **Host API** — 25 mission/capability/skill/trigger/inbox commands, validated, with remote/workstation split; `HostSnapshot.missions` (optional).
+* **Host API** — 24 mission/capability/skill/trigger/inbox commands, validated, with remote/workstation split; `HostSnapshot.missions` (optional).
 * **Feature flag** — off by default; `settings.missions_config` + `BUNNY_MISSIONS`; Settings → Missions toggle.
 * **UI** — Bunny Bar mission strip (title, role glyphs ✓ ● ○ ! ✕, +N), expanded Mission Control (approval scope card, permission cards, agent list, agent detail with executor/activity/provider-plan progress/elapsed/artifacts/dependencies/verification, retry/stop, model-call accounting), 8 s completion state + auto-collapse, Task/Mission composer switch, Home and phone mission sections with Inbox, capability availability list.
 * **Persistence** — additive schema v3 and 14 tables, recorded migration key, idempotent.
