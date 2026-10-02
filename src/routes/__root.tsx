@@ -3,7 +3,7 @@ import { AuthProvider } from "@/lib/auth/provider";
 import { PreviewHostBridge } from "@/components/preview-host-bridge";
 import appCss from "../styles.css?url";
 
-const APP_NAME = "JEV";
+const APP_NAME = "Bunny-A";
 
 export const Route = createRootRoute({
   head: () => ({
@@ -14,9 +14,9 @@ export const Route = createRootRoute({
       {
         name: "description",
         content:
-          "JEV routes one task to Codex, Claude, or Ollama. It does not answer the task itself.",
+          "Bunny-A routes, runs and monitors your workstation's coding agents with approval before launch.",
       },
-      { name: "theme-color", content: "#1c1c1e" },
+      { name: "color-scheme", content: "light dark" },
     ],
     links: [
       { rel: "icon", type: "image/svg+xml", href: "/favicon.svg" },
@@ -29,6 +29,9 @@ export const Route = createRootRoute({
     <html lang="en" className="antialiased" suppressHydrationWarning>
       <head>
         <HeadContent />
+        {/* Rendered directly: the head manager de-duplicates <meta> by name and would drop one of the pair. */}
+        <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)" />
+        <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)" />
       </head>
       <body>
         <PreviewHostBridge />

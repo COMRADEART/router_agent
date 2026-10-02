@@ -13,6 +13,7 @@ type Cap = {
 };
 
 const CAP: Record<ProviderId, Cap> = {
+  opencode: { coding: 0.8, debug: 0.8, research: 0.7, writing: 0.6, ops: 0.7, general: 0.7, context: 0.75, speed: 0.5, local: false },
   codex: { coding: 0.95, debug: 0.92, research: 0.72, writing: 0.6, ops: 0.7, general: 0.74, context: 0.9, speed: 0.42, local: false },
   claude: { coding: 0.86, debug: 0.84, research: 0.95, writing: 0.9, ops: 0.66, general: 0.88, context: 0.92, speed: 0.4, local: false },
   ollama: { coding: 0.58, debug: 0.52, research: 0.48, writing: 0.55, ops: 0.5, general: 0.56, context: 0.45, speed: 0.9, local: true },
@@ -50,17 +51,17 @@ export function analyze(prompt: string, mode: Mode) {
   return { task_type, complexity, latency_priority, privacy_priority, context_requirement };
 }
 
-function weights(mode: Mode) {
+export function weights(mode: Mode) {
   if (mode === "fast") return { fit: 0.22, speed: 0.4, local: 0.28, context: 0.1 };
   if (mode === "deep") return { fit: 0.48, speed: 0.05, local: 0.07, context: 0.4 };
   return { fit: 0.4, speed: 0.22, local: 0.13, context: 0.25 };
 }
 
 function availabilityFactor(live: ProviderLive) {
-  if (live.availability === "offline" || live.availability === "unavailable") return 0.32;
+  if (live.availability === "offline" || live.availability === "unavailable" || live.availability === "not_installed" || live.availability === "unknown") return 0.32;
   if (live.availability === "rate_limited") return 0.45;
   if (live.availability === "busy") return 0.62;
-  if (live.availability === "auth_required") return 0.78;
+  if (live.availability === "authentication_required") return 0.78;
   return 1;
 }
 
@@ -87,8 +88,9 @@ export function scoreProvider(id: ProviderId, prompt: string, mode: Mode, live: 
 function noteFor(id: ProviderId, winner: ProviderId, live: ProviderLive) {
   if (id === winner) return "Selected";
   if (live.availability === "offline") return "Offline on this host";
-  if (live.availability === "auth_required") return "Suitable, but this host has no credential yet";
-  if (live.availability === "unavailable") return "Adapter is not installed";
+  if (live.availability === "authentication_required") return "Suitable, but this host has no credential yet";
+  if (live.availability === "not_installed") return "Not installed on this host";
+  if (live.availability === "unavailable" || live.availability === "unknown") return "Not usable on this host right now";
   if (CAP[id].local && !CAP[winner].local) return "Local and faster, weaker fit for this task";
   if (!CAP[id].local && CAP[winner].local) return "Stronger model, higher latency, leaves the machine";
   if (CAP[id].context > CAP[winner].context) return "More context headroom, lower task fit";

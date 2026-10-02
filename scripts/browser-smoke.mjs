@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import { chromium } from "playwright";
 import { checkedOutputPath, checkedUrl } from "./browser-guard.mjs";
 import { computeBrandWarnings } from "./brand-check.mjs";
@@ -27,10 +27,11 @@ if (args.error) {
 }
 
 const url = checkedUrl(args.url);
-const outPng = checkedOutputPath(args.outPng, ["/workspace"]);
+const outputRoots = process.platform === "win32" ? [resolve(process.cwd())] : ["/workspace"];
+const outPng = checkedOutputPath(args.outPng, outputRoots);
 const derived = derivedPaths(outPng);
-const mobilePng = checkedOutputPath(derived.mobilePng, ["/workspace"]);
-const outJson = checkedOutputPath(derived.verdictJson, ["/workspace"], "verdict JSON");
+const mobilePng = checkedOutputPath(derived.mobilePng, outputRoots);
+const outJson = checkedOutputPath(derived.verdictJson, outputRoots, "verdict JSON");
 
 const MAX_BASELINE_BYTES = 1024 * 1024;
 const baselineRequested = Boolean(args.baseline);
@@ -38,7 +39,7 @@ let baselinePath = null;
 let baselineResolveError = null;
 if (baselineRequested) {
   try {
-    baselinePath = checkedOutputPath(realpathSync(args.baseline), ["/workspace"], "baseline");
+    baselinePath = checkedOutputPath(realpathSync(args.baseline), outputRoots, "baseline");
   } catch (err) {
     baselineResolveError = err?.code ?? "unresolvable path";
   }
@@ -91,6 +92,7 @@ function compareAgainstBaseline(verdict) {
 let browser = null;
 try {
   browser = await chromium.launch({
+    channel: process.env.PLAYWRIGHT_CHANNEL || undefined,
     headless: true,
     args: ["--no-sandbox", "--disable-dev-shm-usage"],
   });
@@ -109,7 +111,7 @@ try {
     // networkidle never settles and would burn the whole timeout.
     const resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
     const status = resp?.status() ?? 0;
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(Number(process.env.BROWSER_SMOKE_SETTLE_MS || 1000));
 
     const title = await page.title();
     const hasCanvas = (await page.locator("canvas").count()) > 0;
@@ -140,7 +142,7 @@ try {
     };
   }
 
-  const brandWarnings = computeBrandWarnings({ hasCanvas: viewports.desktop.hasCanvas });
+  const brandWarnings = computeBrandWarnings({ hasCanvas: viewports.desktop.hasCanvas, workspaceRoot: process.cwd() });
   // Only a dev server answers /__app-env, so smoking the built output reads as
   // indeterminate — report a divergence, never the absence of an observation.
   const authWarnings = authInvariantWarnings(

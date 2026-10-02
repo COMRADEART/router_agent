@@ -1,0 +1,952 @@
+/* Bunny-A M3: semantic motion and glass tokens, shared across every web surface. */
+@property --outer {
+  syntax: "<angle>";
+  inherits: true;
+  initial-value: 0deg;
+}
+@property --inner {
+  syntax: "<angle>";
+  inherits: true;
+  initial-value: 0deg;
+}
+.bunny-app {
+  --content-motion: 220ms;
+  --routing-motion: 760ms;
+  --success-motion: 560ms;
+  --breathing-motion: 3200ms;
+  --warning-motion: 2400ms;
+  --thermal: var(--warning);
+  --font-code: "Cascadia Code", "Cascadia Mono", Consolas, ui-monospace, monospace;
+  --text-metric: 1.75rem;
+  --orb-size: 34px;
+  --orb-large: 68px;
+  --route-length: 36%;
+  --route-min: 0.18;
+  --orb-highlight: color-mix(in srgb, var(--working) 18%, transparent);
+}
+.bunny-app .usage-mark {
+  transition:
+    --outer var(--morph) var(--ease),
+    --inner var(--morph) var(--ease);
+}
+.bunny-app .island-idle-mixed {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+.bunny-app .activity-spark {
+  width: 54px;
+  height: 18px;
+  color: var(--working);
+  flex-shrink: 0;
+}
+.bunny-app .activity-spark polyline {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.25;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.7;
+}
+.bunny-app .island-multitask > button > .usage-mark {
+  flex: 0 0 38px;
+  width: 38px;
+  height: 38px;
+  align-self: center;
+}
+.bunny-app .island-multitask > button > span:not(.usage-mark) {
+  min-width: 0;
+}
+.bunny-app .bunny-orb {
+  --orb-ink: var(--working);
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: var(--orb-size);
+  height: var(--orb-size);
+  flex-shrink: 0;
+  isolation: isolate;
+}
+.bunny-app .bunny-orb.large {
+  width: var(--orb-large);
+  height: var(--orb-large);
+}
+.bunny-app .orb-core {
+  width: 82%;
+  height: 82%;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--orb-ink) 12%, var(--glass));
+  border: 1px solid color-mix(in srgb, var(--orb-ink) 24%, transparent);
+  box-shadow:
+    inset 0 1px 0 var(--luminous),
+    0 0 16px var(--orb-highlight);
+  transition:
+    opacity var(--content-motion),
+    transform var(--content-motion),
+    background-color var(--content-motion);
+}
+.bunny-app .orb-core .bunny-mark {
+  width: 75%;
+  height: 75%;
+}
+.bunny-app .orb-halo,
+.bunny-app .orb-ring {
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--orb-ink);
+  border-radius: 50%;
+  opacity: 0.25;
+  pointer-events: none;
+}
+.bunny-app .orb-halo {
+  inset: -8%;
+  opacity: 0.08;
+}
+.bunny-app .orb-check {
+  position: absolute;
+  color: var(--positive);
+  opacity: 0;
+}
+.bunny-app .bunny-orb[data-state="routing"] {
+  --orb-ink: var(--thinking);
+}
+.bunny-app .bunny-orb[data-state="routing"] .orb-ring {
+  border-style: dashed;
+  opacity: 0.7;
+  animation: bunny-orbit calc(var(--routing-motion) * 3) linear infinite;
+}
+.bunny-app .bunny-orb[data-state="working"] .orb-halo {
+  animation: bunny-breathe var(--breathing-motion) ease-in-out infinite;
+}
+.bunny-app .bunny-orb[data-state="listening"] .orb-ring {
+  animation: bunny-breathe calc(var(--breathing-motion) / 2) ease-in-out infinite;
+}
+.bunny-app .bunny-orb[data-state="waiting"] {
+  --orb-ink: var(--warning);
+}
+.bunny-app .bunny-orb[data-state="waiting"] .orb-halo {
+  animation: bunny-breathe var(--warning-motion) ease-in-out infinite;
+}
+.bunny-app .bunny-orb[data-state="completed"] {
+  --orb-ink: var(--positive);
+}
+.bunny-app .bunny-orb[data-state="completed"] .orb-core {
+  opacity: 0.14;
+}
+.bunny-app .bunny-orb[data-state="completed"] .orb-check {
+  opacity: 1;
+  animation: bunny-check var(--success-motion) var(--ease) both;
+}
+.bunny-app .bunny-orb[data-state="completed"] .orb-halo {
+  animation: bunny-success var(--success-motion) var(--ease) both;
+}
+.bunny-app .bunny-orb[data-state="failed"] {
+  --orb-ink: var(--negative);
+}
+.bunny-app .bunny-orb[data-state="failed"] .orb-halo {
+  animation: bunny-breathe var(--warning-motion) ease-in-out 2;
+}
+.bunny-app .bunny-orb[data-state="offline"] {
+  --orb-ink: var(--subtle);
+  opacity: 0.5;
+  filter: grayscale(1);
+}
+.bunny-app .floating-island[data-orb="failed"] {
+  border-color: color-mix(in srgb, var(--negative) 30%, var(--border));
+}
+.bunny-app .floating-island[data-orb="completed"] {
+  border-color: color-mix(in srgb, var(--positive) 30%, var(--border));
+}
+.bunny-app .island-content {
+  max-height: calc(100dvh - 124px);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.bunny-app .island-system-micro {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex: 1;
+  min-width: 0;
+}
+.bunny-app .micro-sensor {
+  width: 58px;
+  display: grid;
+  gap: var(--s1);
+}
+.bunny-app .micro-sensor span {
+  font-size: 10px;
+  color: var(--muted);
+}
+.bunny-app .micro-sensor .sparkline {
+  height: 12px;
+  overflow: hidden;
+}
+.bunny-app .micro-sensor .sparkline-empty {
+  font-size: 9px;
+  height: 12px;
+}
+.bunny-app .composer-shortcuts {
+  display: flex;
+  gap: var(--s2);
+  flex-wrap: wrap;
+  margin-block: var(--s3) var(--s4);
+}
+.bunny-app .composer-shortcuts button {
+  min-height: 36px;
+  padding: var(--s2) var(--s3);
+  border-radius: var(--r-sm);
+  color: var(--muted);
+  background: var(--field);
+  font-size: var(--text-xs);
+}
+.bunny-app .composer-shortcuts button:hover {
+  color: var(--fg);
+  background: var(--hover);
+}
+.bunny-app .voice-button {
+  margin-left: auto;
+}
+.bunny-app .routing-view {
+  padding-block: var(--s2) !important;
+}
+.bunny-app .routing-graph {
+  position: relative;
+  height: 236px;
+  width: 100%;
+  margin-bottom: var(--s3);
+}
+.bunny-app .routing-center {
+  position: absolute;
+  left: 50%;
+  top: 58%;
+  transform: translate(-50%, -50%);
+  display: grid;
+  justify-items: center;
+  gap: var(--s1);
+}
+.bunny-app .routing-center > span:last-child {
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+.bunny-app .routing-node {
+  position: absolute;
+  left: var(--node-x);
+  top: var(--node-y);
+  transform: translate(-50%, -50%);
+  display: grid;
+  justify-items: center;
+  gap: var(--s1);
+  min-width: 72px;
+  font-size: var(--text-sm);
+}
+.bunny-app .routing-node small {
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.bunny-app .routing-node[data-selected="true"] strong {
+  color: var(--working);
+}
+.bunny-app .routing-node[data-provider="claude"] strong {
+  color: var(--claude);
+}
+.bunny-app .routing-paths,
+.bunny-app .constellation-paths {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: hidden;
+}
+.bunny-app .routing-path {
+  stroke: var(--working);
+  stroke-width: var(--path-weight);
+  opacity: calc(var(--route-min) + var(--route-strength) * 0.32);
+  stroke-linecap: round;
+  transition: opacity var(--content-motion);
+}
+.bunny-app .routing-path[data-provider="claude"] {
+  stroke: var(--claude);
+}
+.bunny-app .routing-path[data-selected="true"] {
+  opacity: 0.78;
+}
+.bunny-app .routing-path[data-known="false"] {
+  opacity: var(--route-min);
+}
+.bunny-app .routing-light,
+.bunny-app .constellation-light {
+  stroke: var(--fg);
+  stroke-dasharray: 16 84;
+  opacity: 0.7;
+  animation: bunny-signal-flow var(--routing-motion) linear infinite;
+}
+.bunny-app .constellation-light {
+  animation-duration: calc(var(--routing-motion) * 2);
+}
+.bunny-app .routing-checks {
+  display: grid;
+  gap: var(--s2);
+  margin-block: var(--s4);
+  text-align: left;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+.bunny-app .routing-checks li {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+.bunny-app .routing-checks li svg {
+  color: var(--positive);
+}
+.bunny-app .routing-settled {
+  padding: var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  margin-block: var(--s3);
+}
+.bunny-app .route-reasons {
+  display: grid;
+  gap: var(--s2);
+  margin-block: var(--s3);
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+.bunny-app .route-reasons li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+}
+.bunny-app .route-reasons svg {
+  color: var(--positive);
+  margin-top: var(--s1);
+}
+.bunny-app .provider-comparison {
+  display: grid;
+  gap: var(--s3);
+  padding-top: var(--s3);
+}
+.bunny-app .comparison-agent {
+  display: grid;
+  gap: var(--s3);
+  padding: var(--s3);
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  width: 100%;
+}
+.bunny-app .comparison-agent[data-selected="true"] {
+  border-color: var(--working);
+  background: var(--working-soft);
+}
+.bunny-app .comparison-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+}
+.bunny-app .comparison-heading .provider-status {
+  margin-left: auto;
+}
+.bunny-app .comparison-score {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+.bunny-app .comparison-score meter {
+  flex: 1;
+  width: 80px;
+  height: 5px;
+}
+.bunny-app .comparison-score meter::-webkit-meter-bar {
+  background: var(--field);
+  border: 0;
+}
+.bunny-app .comparison-score meter::-webkit-meter-optimum-value {
+  background: var(--working);
+}
+.bunny-app .comparison-facts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s2) var(--s3);
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+.bunny-app .comparison-facts span {
+  display: grid;
+  gap: var(--s1);
+}
+.bunny-app .comparison-facts b {
+  color: var(--fg);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.bunny-app .task-journey {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s2);
+  padding-block: var(--s4);
+  width: 100%;
+}
+.bunny-app .task-journey li {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s2);
+  color: var(--subtle);
+  font-size: 10px;
+  flex: 1;
+}
+.bunny-app .task-journey li:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  top: 8px;
+  left: calc(50% + 12px);
+  width: calc(100% - 16px);
+  height: 1px;
+  background: var(--border);
+}
+.bunny-app .journey-dot {
+  display: grid;
+  place-items: center;
+  width: 17px;
+  height: 17px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+}
+.bunny-app .task-journey [data-status="done"] {
+  color: var(--positive);
+}
+.bunny-app .task-journey [data-status="done"] .journey-dot {
+  background: color-mix(in srgb, var(--positive) 12%, transparent);
+  border-color: color-mix(in srgb, var(--positive) 30%, transparent);
+}
+.bunny-app .task-journey [data-status="current"] {
+  color: var(--working);
+}
+.bunny-app .task-journey [data-status="current"] .journey-dot {
+  background: var(--working);
+  border-color: var(--working);
+  animation: bunny-current var(--breathing-motion) ease-in-out infinite;
+}
+.bunny-app .task-journey [data-status="failed"] {
+  color: var(--negative);
+}
+.bunny-app .task-journey [data-status="unavailable"] {
+  text-decoration: underline dotted;
+}
+.bunny-app .activity-ribbon {
+  width: 100%;
+  overflow: hidden;
+  text-align: left;
+  padding: var(--s3) 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  margin-block: var(--s3);
+  mask-image: linear-gradient(to right, transparent, black 4%, black 96%, transparent);
+}
+.bunny-app .ribbon-track {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s4);
+  width: max-content;
+  min-width: 100%;
+}
+.bunny-app .ribbon-event {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  animation: bunny-ribbon var(--content-motion) var(--ease) both;
+}
+.bunny-app .ribbon-event b {
+  color: var(--working);
+  text-transform: uppercase;
+  font-size: 10px;
+  font-weight: 600;
+}
+.bunny-app .ribbon-event > span {
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bunny-app .artifact-preview {
+  display: flex;
+  gap: var(--s3);
+  flex-wrap: wrap;
+  align-items: center;
+  padding: var(--s4);
+  background: var(--field);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  margin-block: var(--s3);
+}
+.bunny-app .artifact-icon {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 56px;
+  border-radius: var(--r-sm);
+  background: var(--working-soft);
+  color: var(--working);
+}
+.bunny-app .artifact-preview > div {
+  flex: 1;
+  min-width: 120px;
+}
+.bunny-app .artifact-preview p,
+.bunny-app .artifact-preview small {
+  color: var(--muted);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+.bunny-app .artifact-preview > svg {
+  color: var(--positive);
+}
+.bunny-app .artifact-preview > p {
+  flex-basis: 100%;
+}
+.bunny-app .constellation-view {
+  width: 100%;
+}
+.bunny-app .constellation-map {
+  position: relative;
+  height: 420px;
+  width: 100%;
+  isolation: isolate;
+}
+.bunny-app .constellation-view.compact .constellation-map {
+  height: 320px;
+}
+.bunny-app .constellation-center {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: grid;
+  justify-items: center;
+  gap: var(--s3);
+  z-index: 2;
+}
+.bunny-app .constellation-center strong {
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+.bunny-app .constellation-assignment {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.bunny-app .constellation-path {
+  stroke: var(--working);
+  stroke-width: 1px;
+  opacity: 0.35;
+  stroke-linecap: round;
+}
+.bunny-app .constellation-assignment button {
+  position: absolute;
+  left: var(--assignment-x);
+  top: var(--assignment-y);
+  transform: translate(-50%, -50%) !important;
+  display: grid;
+  justify-items: center;
+  gap: var(--s1);
+  width: 132px;
+  padding: var(--s2);
+  border-radius: var(--r-md);
+  background: var(--glass);
+  border: 1px solid var(--border);
+  pointer-events: auto;
+}
+.bunny-app .constellation-assignment small {
+  max-width: 100%;
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bunny-app .constellation-assignment time {
+  font-size: 10px;
+  color: var(--subtle);
+}
+.bunny-app .constellation-empty {
+  position: absolute;
+  bottom: 15%;
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+.bunny-app .task-replay {
+  padding-block: var(--s3);
+}
+.bunny-app .replay-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  margin-top: var(--s3);
+}
+.bunny-app .replay-controls input {
+  accent-color: var(--working);
+  min-width: 0;
+}
+.bunny-app .replay-event {
+  display: flex;
+  gap: var(--s3);
+  margin-block: var(--s4);
+  align-items: flex-start;
+}
+.bunny-app .replay-event > div {
+  min-width: 0;
+  flex: 1;
+}
+.bunny-app .replay-event p {
+  color: var(--muted);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+  max-height: 160px;
+  overflow-y: auto;
+}
+.bunny-app .replay-output {
+  max-height: 180px;
+}
+.bunny-app .replay-timeline {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: var(--s1);
+  max-height: 160px;
+  overflow-y: auto;
+  margin-block: var(--s4);
+}
+.bunny-app .replay-timeline button {
+  width: 100%;
+  display: flex;
+  gap: var(--s3);
+  text-align: left;
+  min-height: 44px;
+  padding: var(--s2);
+  border-radius: var(--r-sm);
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+.bunny-app .replay-timeline button[data-selected="true"] {
+  color: var(--fg);
+  background: var(--working-soft);
+}
+.bunny-app .replay-timeline time {
+  color: var(--working);
+}
+.bunny-app .voice-panel {
+  padding-block: var(--s5);
+  display: grid;
+  justify-items: center;
+  gap: var(--s4);
+  text-align: center;
+}
+.bunny-app .voice-panel > p {
+  color: var(--muted);
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+.bunny-app .voice-wave {
+  height: 32px;
+  display: flex;
+  gap: var(--s1);
+  align-items: center;
+}
+.bunny-app .voice-wave i {
+  width: 3px;
+  height: 12px;
+  background: var(--working);
+  border-radius: var(--r-sm);
+  animation: bunny-wave var(--routing-motion) ease-in-out infinite alternate;
+}
+.bunny-app .voice-wave i:nth-child(3n) {
+  animation-delay: 200ms;
+}
+.bunny-app .voice-wave i:nth-child(3n + 1) {
+  animation-delay: 400ms;
+}
+.bunny-app .island-notification {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: 0 var(--s3) var(--s3);
+  padding: var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--field);
+  animation: bunny-ribbon var(--content-motion) var(--ease);
+}
+.bunny-app .island-notification > button:first-child {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: 36px;
+  font-size: var(--text-xs);
+  text-align: left;
+  flex: 1;
+}
+.bunny-app .island-notification > button:first-child > span:last-child {
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.bunny-app .island-notification-indicator {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: 0 auto var(--s2);
+  color: var(--warning);
+  font-size: var(--text-xs);
+  min-height: 28px;
+}
+.bunny-app .metric[data-thermal="elevated"] {
+  border-color: color-mix(in srgb, var(--warning) 25%, var(--border));
+}
+.bunny-app .metric[data-thermal="warning"] {
+  border-color: color-mix(in srgb, var(--warning) 50%, var(--border));
+}
+.bunny-app .metric[data-thermal="warning"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--thermal);
+  border-radius: inherit;
+  pointer-events: none;
+  animation: bunny-thermal var(--warning-motion) ease-in-out infinite;
+}
+.bunny-app .metric {
+  position: relative;
+}
+.bunny-app .output-panel {
+  font-family: var(--font-code);
+}
+.bunny-app .home-active-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--s4);
+}
+.bunny-app .home-active-card {
+  text-align: left;
+  padding: var(--s4);
+  display: grid;
+  gap: var(--s2);
+  width: 100%;
+}
+.bunny-app .home-active-card > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.bunny-app .home-active-card .task-journey {
+  padding-bottom: 0;
+}
+.bunny-app .home-active-card > h3 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bunny-app .route-explanation {
+  margin-block: var(--s3);
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+.bunny-app .route-explanation .route-reason {
+  margin-top: var(--s3);
+}
+.bunny-app .home-activity {
+  margin-top: var(--s5);
+}
+.bunny-app .home-activity .activity-timeline {
+  max-height: 220px;
+  overflow: hidden;
+}
+.bunny-app[data-companion="true"] {
+  --content-motion: 180ms;
+  --morph: 250ms;
+}
+.bunny-app[data-companion="true"] .bunny-orb .orb-halo,
+.bunny-app[data-companion="true"] .constellation-link i {
+  animation: none;
+}
+.bunny-app .phone-task[data-state="waiting_for_approval"] {
+  border-color: color-mix(in srgb, var(--warning) 35%, var(--border));
+}
+.bunny-app .phone-task[data-state="completed"] {
+  border-color: color-mix(in srgb, var(--positive) 35%, var(--border));
+}
+.bunny-app .phone-metrics[data-thermal="warning"] {
+  border-color: var(--warning);
+}
+.bunny-app .phone-task .task-journey {
+  padding-bottom: 0;
+}
+.bunny-app .phone-home {
+  grid-template-columns: minmax(0, 1fr);
+}
+.bunny-app .phone-home > *,
+.bunny-app .phone-task {
+  min-width: 0;
+}
+.bunny-app .replay-assignment {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  font-size: var(--text-xs);
+  margin-bottom: var(--s3);
+}
+@keyframes bunny-signal-flow {
+  from {
+    stroke-dashoffset: 100;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+@keyframes bunny-orbit {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes bunny-breathe {
+  0%,
+  100% {
+    transform: scale(0.97);
+    opacity: 0.16;
+  }
+  50% {
+    transform: scale(1.1);
+    opacity: 0.48;
+  }
+}
+@keyframes bunny-success {
+  from {
+    transform: scale(0.95);
+    opacity: 0.6;
+  }
+  to {
+    transform: scale(1.2);
+    opacity: 0.1;
+  }
+}
+@keyframes bunny-check {
+  from {
+    transform: scale(0.85);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+@keyframes bunny-current {
+  50% {
+    opacity: 0.45;
+  }
+}
+@keyframes bunny-route-flow {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(330%);
+  }
+}
+@keyframes bunny-ribbon {
+  from {
+    transform: translateX(8px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+@keyframes bunny-wave {
+  to {
+    transform: scaleY(2);
+    opacity: 0.5;
+  }
+}
+@keyframes bunny-thermal {
+  0%,
+  100% {
+    opacity: 0.12;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+@media (max-width: 600px) {
+  .bunny-app .composer-shortcuts button {
+    min-height: 44px;
+  }
+  .bunny-app .constellation-assignment button {
+    width: 100px;
+  }
+  .bunny-app .constellation-map {
+    height: 340px;
+  }
+  .bunny-app .home-active-grid {
+    grid-template-columns: 1fr;
+  }
+  .bunny-app .desktop-toolbar nav button {
+    font-size: var(--text-xs);
+    padding-inline: var(--s2);
+  }
+  .bunny-app .desktop-toolbar nav button svg {
+    display: none;
+  }
+  .bunny-app .micro-sensor {
+    width: 42px;
+  }
+}
+.bunny-app[data-motion="reduced"] *,
+.bunny-app[data-motion="reduced"] *::before,
+.bunny-app[data-motion="reduced"] *::after {
+  animation: none !important;
+  transition-property: opacity, background-color, color !important;
+  transition-duration: var(--quick) !important;
+}
+.bunny-app[data-motion="off"] *,
+.bunny-app[data-motion="off"] *::before,
+.bunny-app[data-motion="off"] *::after {
+  animation: none !important;
+  transition: none !important;
+  scroll-behavior: auto !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .bunny-app *,
+  .bunny-app *::before,
+  .bunny-app *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+@media (forced-colors: active) {
+  .bunny-app .orb-core,
+  .bunny-app .orb-halo,
+  .bunny-app .orb-ring,
+  .bunny-app .comparison-agent,
+  .bunny-app .constellation-assignment button {
+    border-color: CanvasText;
+  }
+  .bunny-app .routing-path,
+  .bunny-app .constellation-link {
+    background: CanvasText;
+  }
+}

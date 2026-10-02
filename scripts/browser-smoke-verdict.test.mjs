@@ -12,6 +12,7 @@ import {
   normalizeBodyText,
   normalizedBodyTextHash,
   parseSmokeArgs,
+  defaultScreenshotPath,
 } from "./browser-smoke-verdict.mjs";
 
 const TEMPLATE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -279,7 +280,7 @@ test("baselineComparison fails closed on malformed or wrong-shape baselines", ()
 test("parseSmokeArgs defaults", () => {
   assert.deepEqual(parseSmokeArgs([], {}), {
     url: "http://127.0.0.1:8080/",
-    outPng: "/workspace/screenshots/app-builder-preview.png",
+    outPng: defaultScreenshotPath(),
     baseline: "",
   });
 });
@@ -377,10 +378,11 @@ test("browser-smoke wires the guard and verdict helpers", () => {
   assert.match(src, /from "\.\/browser-smoke-verdict\.mjs"/);
   assert.match(src, /const args = parseSmokeArgs\(process\.argv\.slice\(2\), process\.env\)/);
   assert.match(src, /const url = checkedUrl\(args\.url\)/);
-  assert.match(src, /const outPng = checkedOutputPath\(args\.outPng, \["\/workspace"\]\)/);
-  assert.match(src, /const mobilePng = checkedOutputPath\(derived\.mobilePng, \["\/workspace"\]\)/);
-  assert.match(src, /const outJson = checkedOutputPath\(derived\.verdictJson, \["\/workspace"\]/);
-  assert.match(src, /checkedOutputPath\(realpathSync\(args\.baseline\), \["\/workspace"\]/);
+  assert.match(src, /const outPng = checkedOutputPath\(args\.outPng, outputRoots\)/);
+  assert.match(src, /const outputRoots = process\.platform === "win32" \? \[resolve\(process\.cwd\(\)\)\] : \["\/workspace"\]/);
+  assert.match(src, /const mobilePng = checkedOutputPath\(derived\.mobilePng, outputRoots\)/);
+  assert.match(src, /const outJson = checkedOutputPath\(derived\.verdictJson, outputRoots/);
+  assert.match(src, /checkedOutputPath\(realpathSync\(args\.baseline\), outputRoots/);
   assert.match(src, /baselinePath === outJson/);
   assert.match(src, /normalizedBodyTextHash\(/);
   assert.match(src, /bodyTextPrefix\(/);
@@ -413,4 +415,10 @@ test("browser-smoke file I/O only touches guarded paths", () => {
   assert.deepEqual(reads, ["baselinePath"]);
   const stats = [...src.matchAll(/statSync\(\s*([A-Za-z_$][\w$.]*)/g)].map((m) => m[1]);
   assert.deepEqual(stats, ["baselinePath"]);
+});
+
+test("defaultScreenshotPath stays inside the allowed output root on each platform", () => {
+  assert.equal(defaultScreenshotPath("linux", "/ignored"), "/workspace/screenshots/app-builder-preview.png");
+  const bs = String.fromCharCode(92);
+  assert.equal(defaultScreenshotPath("win32", ["C:", "work", "app"].join(bs)), "C:/work/app/screenshots/app-builder-preview.png");
 });

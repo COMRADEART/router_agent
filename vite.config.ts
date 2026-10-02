@@ -1,5 +1,5 @@
-import { readdirSync } from "node:fs";
-import { join } from "node:path";
+import { readdirSync, realpathSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { Plugin } from "vite";
 import { defineConfig } from "vite";
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
@@ -150,6 +150,7 @@ export default defineConfig(({ command, isPreview }) => ({
     host: "0.0.0.0",
     port: 8080,
     strictPort: true,
+    watch: { ignored: ["**/test-results/**", "**/releases/**", "**/install/**", "**/screenshots/**", "**/artifacts/**", "**/.bunny-a/**"] },
   },
   preview: {
     host: "127.0.0.1",
@@ -170,7 +171,15 @@ export default defineConfig(({ command, isPreview }) => ({
     ...(command === "build" || isPreview
       ? [
           nitro({
-            preset: "vercel",
+            // Desktop packages use a standalone Node handler; web deploys stay on Vercel.
+            preset: process.env.JEV_DESKTOP_BUILD === "1" ? "node-middleware" : "vercel",
+            serveStatic: process.env.JEV_DESKTOP_BUILD === "1" ? true : undefined,
+            // nf3 otherwise traces from the drive root on Windows. Keep it
+            // within the workspace, including package-build node_modules junctions.
+            traceOpts:
+              process.platform === "win32"
+                ? { nft: { base: dirname(realpathSync("node_modules")) } }
+                : undefined,
             // Auto-registers server/middleware/* (the PWA install page +
             // manifest + head-tag middleware). Nitro v3 defaults serverDir to
             // false, so removing this silently unwires /?install=1 on deploys.

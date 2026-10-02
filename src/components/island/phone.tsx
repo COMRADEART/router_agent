@@ -1,127 +1,356 @@
 import { useState } from "react";
-import type { Mode } from "@/lib/orch/types";
+import {
+  ArrowRight,
+  Bell,
+  Check,
+  ChevronRight,
+  Link2,
+  Monitor,
+  Plus,
+  ShieldCheck,
+  Smartphone,
+} from "lucide-react";
 import { activeTasks, liveProviders, useIsland } from "@/store/use-island";
+import { elapsed, percent, RUNNING } from "./ui-model";
+import { NAMES, ProviderMark, ProviderStatus, TaskActivity, TaskBadge } from "./ui";
+import { openTask } from "./task";
+import { thermalReadingFor } from "./ui-model";
 
-export function Phone() {
-  const setSheet = useIsland((state) => state.setSheet);
-  const tasks = useIsland((state) => state.tasks);
-  const samples = useIsland((state) => state.samples);
-  const host = useIsland((state) => state.host);
-  const setHost = useIsland((state) => state.setHost);
-  const autoSubmit = useIsland((state) => state.autoSubmit);
-  const setAutoSubmit = useIsland((state) => state.setAutoSubmit);
-  const ollamaUp = useIsland((state) => state.ollamaUp);
-  const ollamaModels = useIsland((state) => state.ollamaModels);
-  const extensions = useIsland((state) => state.extensions);
-  const prompt = useIsland((state) => state.prompt);
-  const setPrompt = useIsland((state) => state.setPrompt);
-  const mode = useIsland((state) => state.mode);
-  const setMode = useIsland((state) => state.setMode);
-  const submit = useIsland((state) => state.submit);
-  const openDecision = useIsland((state) => state.openDecision);
-  const latest = samples[samples.length - 1];
-  const providers = liveProviders({ tasks, ollamaUp, ollamaModels, extensions }).filter((provider) => !provider.extension);
-  const running = activeTasks(tasks);
-  const [composing, setComposing] = useState(false);
-  const presence = host === "sleeping" ? "Sleeping" : "Online";
-
+export function Phone({ now }: { now: number }) {
+  const store = useIsland();
+  const sample = store.samples.at(-1);
+  const active = activeTasks(store.tasks);
+  const heat = thermalReadingFor(store.samples, store.host, store.cpuWarn, store.gpuWarn, now);
+  const working = active.some((t) => RUNNING.includes(t.state));
+  const presence = !store.connectionChecked
+    ? "Connecting"
+    : store.pairingRequired
+      ? "Not paired"
+      : store.host === "online"
+        ? working
+          ? "Busy"
+          : "Idle"
+        : store.host === "sleeping"
+          ? "Sleeping"
+          : "Offline";
   return (
-    <div className="fixed inset-0 overflow-auto bg-[#f2f2f7] text-[#1d1d1f]">
-      <div className="mx-auto flex min-h-full w-full max-w-md flex-col gap-4 px-4 py-6">
-        <header className="flex items-start justify-between">
+    <div className="phone-home">
+      <section className="workstation-card glass">
+        <div>
+          <span className="workstation-icon">
+            <Monitor size={24} />
+          </span>
           <div>
-            <p className="text-[13px] text-[#6e6e73]">Workstation</p>
-            <h1 className="text-[34px] leading-none font-bold tracking-tight">My laptop</h1>
-            <p className="mt-1 text-[15px] text-[#248a3d]">{presence}</p>
+            <p className="eyebrow">Your connection</p>
+            <h1>My workstation</h1>
           </div>
-          <button type="button" onClick={() => setSheet(null)} className="tap min-h-11 text-[17px] text-[#007aff]">
-            Desktop
-          </button>
-        </header>
-        <p className="text-[13px] text-[#6e6e73]">
-          Remote TLS is not configured. This companion shares the workstation session in this browser. Provider secrets are not on the phone.
-        </p>
-        <section className="rounded-2xl bg-white px-4 py-3">
-          <p className="text-[13px] text-[#6e6e73]">CPU {latest?.cpu.utilization == null ? "—" : `${latest.cpu.utilization}%`}</p>
-          <p className="text-[13px] text-[#6e6e73]">Temperature unavailable</p>
-          <p className="text-[13px] text-[#6e6e73]">
-            RAM {latest ? `${Math.round((latest.memory.usedBytes / latest.memory.totalBytes) * 100)}%` : "—"}
+        </div>
+        <span className="phone-presence" data-state={store.host}>
+          <span className="presence-dot" />
+          {store.host === "online" ? `Online · ${presence}` : presence}
+        </span>
+        {store.host !== "online" && !store.pairingRequired ? (
+          <p>
+            {store.host === "sleeping"
+              ? "Bunny can run your task when the workstation wakes."
+              : "The workstation is unreachable. Sleep status is unavailable."}
           </p>
-          <p className="text-[13px] text-[#6e6e73]">No GPU telemetry on this host</p>
-        </section>
-        <section>
-          <h2 className="mb-2 px-1 text-[13px] text-[#6e6e73]">Providers</h2>
-          <ul className="overflow-hidden rounded-2xl bg-white">
-            {providers.map((provider) => (
-              <li key={provider.id} className="flex min-h-12 items-center justify-between border-b border-black/10 px-4 last:border-b-0">
-                <span className="text-[17px]">{provider.name}</span>
-                <span className="text-[15px] text-[#6e6e73]">{provider.usage_note}</span>
-              </li>
-            ))}
-          </ul>
-        </section>
-        <section>
-          <h2 className="mb-2 px-1 text-[13px] text-[#6e6e73]">Active tasks</h2>
-          {running.length === 0 ? <p className="px-1 text-[15px] text-[#6e6e73]">None.</p> : null}
-          <ul className="overflow-hidden rounded-2xl bg-white">
-            {running.map((task) => (
-              <li key={task.id}>
-                <button type="button" onClick={() => openDecision(task.id)} className="tap flex min-h-12 w-full items-center justify-between px-4 text-left">
-                  <span>
-                    <span className="block text-[17px]">{task.title}</span>
-                    <span className="text-[13px] capitalize text-[#6e6e73]">{task.provider}</span>
-                  </span>
-                  <span className="text-[13px] capitalize text-[#6e6e73]">{task.state.replaceAll("_", " ")}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </section>
-        {composing ? (
+        ) : null}
+      </section>
+      {store.pairingRequired ? (
+        <Pairing compact />
+      ) : (
+        <>
+          <section>
+            <div className="section-heading">
+              <h2 className="eyebrow">Active</h2>
+              <span className="caption">
+                {active.length
+                  ? `${active.length} ${active.length === 1 ? "task" : "tasks"}`
+                  : "All quiet"}
+              </span>
+            </div>
+            {active.length ? (
+              active.map((task) => (
+                <article className="phone-task glass" key={task.id} data-state={task.state}>
+                  <button
+                    className="phone-task-heading"
+                    onClick={() =>
+                      task.state === "waiting_for_approval"
+                        ? store.openDecision(task.id)
+                        : openTask(task.id)
+                    }
+                  >
+                    <ProviderMark
+                      provider={liveProviders(store).find((p) => p.id === task.provider)!}
+                    />
+                    <div>
+                      <small>{NAMES[task.provider]}</small>
+                      <h3>{task.title}</h3>
+                    </div>
+                    <time>{elapsed(task, now)}</time>
+                    <ChevronRight size={16} />
+                  </button>
+                  {task.state === "waiting_for_approval" ? (
+                    <div className="phone-review">
+                      <TaskBadge state={task.state} />
+                      <button className="btn primary" onClick={() => store.openDecision(task.id)}>
+                        Review route <ArrowRight size={14} />
+                      </button>
+                    </div>
+                  ) : (
+                    <TaskActivity task={task} />
+                  )}
+                </article>
+              ))
+            ) : (
+              <div className="phone-quiet glass">
+                <Check size={16} />
+                <p>No active tasks. Ready for your next idea.</p>
+              </div>
+            )}
+          </section>
           <form
-            className="flex flex-col gap-3 rounded-2xl bg-white p-4"
-            onSubmit={(event) => {
-              event.preventDefault();
-              submit();
-              setComposing(false);
+            className="phone-prompt glass"
+            onSubmit={(e) => {
+              e.preventDefault();
+              store.setSheet("compose");
             }}
           >
-            <label className="text-[13px] text-[#6e6e73]">
-              New task
-              <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={4} className="mt-2 w-full text-[17px] text-[#1d1d1f] outline-none" />
-            </label>
-            <div className="flex gap-2">
-              {(["fast", "balanced", "deep"] as Mode[]).map((item) => (
-                <button
-                  key={item}
-                  type="button"
-                  onClick={() => setMode(item)}
-                  className="tap min-h-11 flex-1 rounded-full text-[13px] capitalize"
-                  style={{ background: mode === item ? "#007aff" : "#e5e5ea", color: mode === item ? "#fff" : "#1d1d1f" }}
-                >
-                  {item}
-                </button>
+            <label htmlFor="phone-prompt">Ask Bunny…</label>
+            <div>
+              <input
+                id="phone-prompt"
+                placeholder="What would you like to do?"
+                value={store.prompt}
+                maxLength={16000}
+                onChange={(e) => store.setPrompt(e.target.value)}
+              />
+              <button className="icon-button" type="submit" aria-label="Compose remote task">
+                <ArrowRight size={20} />
+              </button>
+            </div>
+          </form>
+          {store.drafts.length ? (
+            <section>
+              <h2 className="eyebrow">Saved on this device</h2>
+              {store.drafts.map((d) => (
+                <div className="phone-draft glass" key={d.id}>
+                  <p>{d.prompt}</p>
+                  <button className="quiet-button" onClick={() => store.reviewDraft(d.id)}>
+                    Review <ArrowRight size={14} />
+                  </button>
+                  <button className="quiet-button" onClick={() => store.removeDraft(d.id)}>
+                    Discard
+                  </button>
+                </div>
+              ))}
+            </section>
+          ) : null}
+          <section>
+            <div className="section-heading">
+              <h2 className="eyebrow">System</h2>
+              <button className="quiet-button" onClick={() => store.setSheet("system")}>
+                View <ChevronRight size={13} />
+              </button>
+            </div>
+            <div className="phone-metrics glass" data-thermal={heat ? "warning" : "normal"}>
+              <div>
+                <span>CPU</span>
+                <strong>{percent(sample?.cpu.utilization)}</strong>
+              </div>
+              <div>
+                <span>GPU</span>
+                <strong>
+                  {percent(sample?.gpus.find((g) => g.utilization != null)?.utilization)}
+                </strong>
+              </div>
+              <div>
+                <span>RAM</span>
+                <strong>
+                  {percent(
+                    sample && sample.memory.totalBytes > 0
+                      ? (sample.memory.usedBytes / sample.memory.totalBytes) * 100
+                      : null,
+                  )}
+                </strong>
+              </div>
+            </div>
+            {sample && store.host !== "online" ? (
+              <p className="caption">Saved reading · {new Date(sample.at).toLocaleTimeString()}</p>
+            ) : null}
+          </section>
+          <section>
+            <div className="section-heading">
+              <h2 className="eyebrow">Providers</h2>
+              <span className="caption">On your workstation</span>
+            </div>
+            <div className="phone-providers glass">
+              {liveProviders(store)
+                .filter((p) => !p.extension)
+                .map((p) => (
+                  <button key={p.id} onClick={() => store.setProviderFocus(p.id)}>
+                    <ProviderMark provider={p} />
+                    <strong>{NAMES[p.id]}</strong>
+                    <ProviderStatus provider={p} />
+                  </button>
+                ))}
+            </div>
+          </section>
+        </>
+      )}
+      <button className="phone-link" onClick={() => store.setSheet("extensions")}>
+        <Bell size={17} />
+        Notifications
+        <ChevronRight size={16} />
+      </button>
+    </div>
+  );
+}
+export function Pairing({ compact = false }: { compact?: boolean }) {
+  const store = useIsland();
+  const [code, setCode] = useState("");
+  const [name, setName] = useState("Phone companion");
+  const [status, setStatus] = useState("");
+  const [busy, setBusy] = useState(false);
+  const companion =
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("companion") === "1";
+  const secure = typeof window !== "undefined" && window.location.protocol === "https:";
+  return (
+    <section className={`pairing glass ${compact ? "compact" : ""}`}>
+      <div className="pairing-title">
+        <Smartphone size={26} />
+        <p className="eyebrow">Remote access</p>
+        <h2>{companion ? "Bring Bunny with you." : "Your workstation, wherever you are."}</h2>
+        <p>
+          {companion
+            ? "Enter the one-time code from Bunny Island."
+            : "Pair a phone with your workstation’s secure companion."}
+        </p>
+        <span className="caption">
+          <ShieldCheck size={14} />
+          Private access · one-time pairing
+        </span>
+      </div>
+      {!companion ? (
+        <>
+          <div className="pairing-workstation">
+            <p className="caption">
+              {store.remoteConfigured
+                ? "The Host manages your authorized devices and HTTPS connection."
+                : "Remote access is not configured on this workstation."}
+            </p>
+            {store.remoteUrl ? (
+              <a
+                className="btn secondary"
+                href={`${store.remoteUrl}/?companion=1`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Open secure phone companion <ArrowRight size={15} />
+              </a>
+            ) : (
+              <p className="caption">Secure address unavailable.</p>
+            )}
+            <button
+              className="btn primary"
+              disabled={store.host !== "online" || !store.remoteConfigured}
+              onClick={store.createPairCode}
+            >
+              <Plus size={15} />
+              Create workstation pairing code
+            </button>
+            {store.pairCode ? (
+              <div className="pairing-code-display">
+                <code>{store.pairCode}</code>
+                <small>Single use · expires in 10 minutes</small>
+              </div>
+            ) : null}
+          </div>
+          {store.devices.length ? (
+            <div className="paired-devices">
+              <h3 className="eyebrow">Paired devices</h3>
+              {store.devices.map((d) => (
+                <div key={d.id}>
+                  <Smartphone size={16} />
+                  <span>{d.name}</span>
+                  <button
+                    className="quiet-button danger-text"
+                    onClick={() => store.revokeDevice(d.id)}
+                  >
+                    Revoke access
+                  </button>
+                </div>
               ))}
             </div>
-            <button type="submit" className="tap min-h-11 rounded-full bg-[#007aff] text-[17px] text-white">
-              Submit
-            </button>
-          </form>
-        ) : (
-          <button type="button" onClick={() => setComposing(true)} className="tap min-h-12 rounded-2xl bg-[#007aff] text-[17px] font-medium text-white">
-            New task
+          ) : null}
+        </>
+      ) : store.host === "online" ? (
+        <p className="pair-status">
+          <Check size={16} />
+          This device is securely paired.
+        </p>
+      ) : (
+        <form
+          className="pairing-form"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            if (busy) return;
+            setBusy(true);
+            try {
+              const response = await fetch("/api/bunny-pair", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ code, name }),
+              });
+              const result = await response.json();
+              if (!response.ok) throw new Error(result.error || "Pairing failed.");
+              setCode("");
+              setStatus("Paired securely. Reconnecting…");
+              await store.refreshOllama();
+            } catch (error) {
+              setStatus(error instanceof Error ? error.message : "Pairing failed.");
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          <label className="field">
+            Device name
+            <input
+              value={name}
+              maxLength={100}
+              onChange={(e) => setName(e.target.value)}
+              required
+              autoComplete="off"
+            />
+          </label>
+          <label className="field">
+            Workstation code
+            <input
+              placeholder="Enter your one-time code"
+              value={code}
+              maxLength={100}
+              onChange={(e) => setCode(e.target.value)}
+              autoComplete="off"
+              autoCapitalize="none"
+              spellCheck={false}
+              required
+            />
+          </label>
+          <button className="btn primary" disabled={!code.trim() || !secure || busy}>
+            <Link2 size={16} />
+            {busy ? "Pairing…" : "Pair this device"}
           </button>
-        )}
-        <label className="flex min-h-11 items-center justify-between text-[15px]">
-          Workstation sleeping
-          <input type="checkbox" checked={host === "sleeping"} onChange={(event) => setHost(event.target.checked ? "sleeping" : "online")} />
-        </label>
-        <label className="flex min-h-11 items-center justify-between text-[15px]">
-          Auto-send queue when online
-          <input type="checkbox" checked={autoSubmit} onChange={(event) => setAutoSubmit(event.target.checked)} />
-        </label>
-        <p className="pb-6 text-[13px] text-[#6e6e73]">Push notifications are not configured. Alerts stay in this session.</p>
-      </div>
-    </div>
+          {!secure ? (
+            <p className="caption">Use your workstation’s secure HTTPS address for pairing.</p>
+          ) : null}
+          <p className="pair-status" role="status">
+            {status}
+          </p>
+        </form>
+      )}
+    </section>
   );
 }

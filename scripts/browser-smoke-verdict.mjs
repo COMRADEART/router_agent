@@ -14,6 +14,10 @@ const IDENTITY_PREFIX_LEN = 64;
 export function bodyTextPrefix(text) {
   return normalizeBodyText(text).slice(0, IDENTITY_PREFIX_LEN);
 }
+// The sandbox writes under /workspace; on Windows the only allowed root is the current directory.
+export function defaultScreenshotPath(platform = process.platform, cwd = process.cwd()) {
+  return platform === "win32" ? `${cwd.replaceAll("\\", "/")}/screenshots/app-builder-preview.png` : "/workspace/screenshots/app-builder-preview.png";
+}
 export function parseSmokeArgs(argv, env = {}) {
   const positional = [];
   let baseline = env.BROWSER_SMOKE_BASELINE || "";
@@ -35,7 +39,7 @@ export function parseSmokeArgs(argv, env = {}) {
   }
   return {
     url: positional[0] || "http://127.0.0.1:8080/",
-    outPng: positional[1] || "/workspace/screenshots/app-builder-preview.png",
+    outPng: positional[1] || defaultScreenshotPath(),
     baseline,
   };
 }

@@ -6,9 +6,9 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
   appNameFromHost,
-  createHeadInjector,
+  createHeadInjector as createWorkspaceHeadInjector,
   grokXCreatorHeadTags,
-  injectGrokPwaHead,
+  injectGrokPwaHead as injectWorkspaceGrokPwaHead,
   isDocumentPath,
   isInstallQuery,
   publicAppHost,
@@ -20,6 +20,14 @@ import {
 import { renderInstallPage } from "./grok-pwa-plugin.mjs";
 
 const TEMPLATE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+// Fixture-based assertions must not inherit the application's real title or art.
+// Tests that exercise disk metadata supply their own cwd explicitly.
+const FIXTURE_ROOT = mkdtempSync(join(tmpdir(), "grok-pwa-fixtures-"));
+const injectGrokPwaHead = (html, context = {}) =>
+  injectWorkspaceGrokPwaHead(html, { cwd: FIXTURE_ROOT, ...context });
+const createHeadInjector = (context = {}) =>
+  createWorkspaceHeadInjector({ cwd: FIXTURE_ROOT, ...context });
 
 test("injects before </head>", () => {
   const out = injectGrokPwaHead("<html><head><title>x</title></head><body></body></html>");

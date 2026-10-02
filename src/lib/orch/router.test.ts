@@ -25,8 +25,8 @@ function live(id: ProviderId, availability: ProviderLive["availability"], model:
 }
 
 const primary = [
-  live("codex", "auth_required"),
-  live("claude", "auth_required"),
+  live("codex", "authentication_required"),
+  live("claude", "authentication_required"),
   live("ollama", "ready", "llama3.2"),
 ];
 

@@ -1,0 +1,9 @@
+import { readFileSync } from "node:fs";
+const credentials=JSON.parse(readFileSync(".bunny-a/credentials.json","utf8"));
+const root=`http://127.0.0.1:${credentials.port}`;
+const health=await (await fetch(`${root}/health`)).json();
+if(health.app!=="Bunny-A" || health.instanceId!==credentials.instanceId || health.pid!==credentials.pid) throw new Error("Host ownership mismatch; no process stopped.");
+const state=await (await fetch(`${root}/state`,{headers:{authorization:`Bearer ${credentials.token}`}})).json();
+if(state.tasks.some(t=>["running","launching","verifying","waiting_for_input","waiting_for_agent_approval"].includes(t.state))) throw new Error("Active jobs exist. Explicitly stop those first.");
+process.kill(credentials.pid,"SIGTERM");
+console.log("Stopped only the identity-verified Bunny-A Host; no active jobs existed.");

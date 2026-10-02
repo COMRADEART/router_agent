@@ -1,0 +1,10 @@
+import { readFileSync } from "node:fs";
+import { resolve,join } from "node:path";
+import { execFileSync } from "node:child_process";
+const root=resolve(".");
+const packagePath=JSON.parse(readFileSync(join(root,".bunny-a/deployment.json"),"utf8")).packagePath;
+const health=await (await fetch("http://127.0.0.1:8084/bunny-health")).json();
+if(health.app!=="Bunny-A" || health.root!==root || !Number.isSafeInteger(health.pid)) throw new Error("Gateway identity mismatch; nothing stopped.");
+const command=execFileSync("powershell.exe",["-NoProfile","-Command",`$ErrorActionPreference='Stop'; (Get-CimInstance Win32_Process -Filter 'ProcessId=${health.pid}').CommandLine`],{encoding:"utf8",windowsHide:true});
+if(!command.includes(join(packagePath,"Bunny-Server.mjs"))) throw new Error("Gateway process ownership mismatch; nothing stopped.");
+process.kill(health.pid,"SIGTERM");console.log("Stopped only the identity-verified dashboard gateway. Host and owned jobs remain independent.");

@@ -1,6 +1,6 @@
 export type Mode = "fast" | "balanced" | "deep";
 
-export type ProviderId = "codex" | "claude" | "ollama" | "cline" | "cursor";
+export type ProviderId = "codex" | "claude" | "ollama" | "opencode" | "cline" | "cursor";
 
 export type TaskType = "coding" | "debug" | "research" | "writing" | "ops" | "general";
 
@@ -10,9 +10,59 @@ export type Availability =
   | "ready"
   | "busy"
   | "offline"
-  | "unavailable"
+  | "not_installed"
+  | "authentication_required"
   | "rate_limited"
-  | "auth_required";
+  | "unavailable"
+  | "unknown";
+
+/** What a real probe established about a provider's credentials; "unknown" until a safe probe or a real run settles it. */
+export type AuthState = "authenticated" | "not_authenticated" | "unknown" | "not_required";
+
+/** Optional adapter features. Unsupported ones carry the reason instead of being silently absent. */
+export type ProviderFeature =
+  | "launch"
+  | "stop"
+  | "sendInput"
+  | "approval"
+  | "resume"
+  | "modelSelection"
+  | "terminalAttachment"
+  | "usageQuota"
+  | "projectAwareness";
+export type ProviderFeatures = Record<ProviderFeature, { supported: boolean; note: string }>;
+
+/** A provider-reported quota window. `kind` places it: short window = inner ring, weekly = outer ring. */
+export type UsageWindow = {
+  label: string;
+  usedPercent: number;
+  resetsAt: number | null;
+  kind?: "short" | "weekly" | "other";
+  windowMinutes?: number | null;
+};
+
+/** Which usage facts the provider itself exposes to Bunny-A. */
+export type UsageCapabilities = {
+  shortWindow: boolean;
+  weekly: boolean;
+  resetTime: boolean;
+  tokenUsage: boolean;
+  activeJobs: boolean;
+  source: string;
+};
+
+/** Counted by Bunny-A from its own task records; never presented as provider quota. */
+export type ObservedUsage = {
+  tasks: number;
+  completed: number;
+  failed: number;
+  stopped: number;
+  runtimeMs: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  lastTaskAt: number | null;
+};
 
 export type TaskState =
   | "queued"
@@ -21,6 +71,8 @@ export type TaskState =
   | "launching"
   | "running"
   | "waiting_for_input"
+  | "waiting_for_agent_approval"
+  | "verifying"
   | "paused"
   | "completed"
   | "failed"
@@ -38,6 +90,25 @@ export type RouteDecision = {
   reason: string;
   alternatives: { provider: ProviderId; note: string; score: number }[];
   scores: { provider: ProviderId; score: number }[];
+  mode?: Mode;
+  requirements?: string[];
+  eligible_providers?: ProviderId[];
+  excluded?: { provider: ProviderId; reason: string }[];
+  reasons?: string[];
+  confidence_kind?: "uncalibrated_score";
+  policy_id?: string;
+  inputs?: RouteInputs;
+};
+
+/** What the router actually used, recorded with each decision. */
+export type RouteInputs = {
+  weights: { fit: number; speed: number; local: number; context: number };
+  latency_priority: number;
+  privacy_priority: number;
+  context_requirement: ContextNeed;
+  workload: Partial<Record<ProviderId, number>>;
+  history: Partial<Record<ProviderId, number>>;
+  quota: Partial<Record<ProviderId, { label: string; usedPercent: number }[]>>;
 };
 
 export type Usage = {
@@ -63,6 +134,19 @@ export type ProviderLive = {
   detail: string;
   vram: string | null;
   tokens_per_sec: number | null;
+  executable?: string | null;
+  version?: string | null;
+  capabilities?: string[];
+  usageWindows?: UsageWindow[];
+  usageObservedAt?: number | null;
+  authenticatedState?: AuthState;
+  models?: string[];
+  usageCapabilities?: UsageCapabilities;
+  features?: ProviderFeatures;
+  activeSessions?: { taskId: string; providerSessionId: string | null; pid: number | null }[];
+  observed?: ObservedUsage;
+  probedAt?: number | null;
+  evidence?: string[];
 };
 
 export type Project = {
@@ -92,6 +176,54 @@ export type OrchTask = {
   error: string | null;
   logs: TaskLog[];
   pauseSupported: boolean;
+  sessionId?: string | null;
+  pid?: number | null;
+  cwd?: string;
+  exitCode?: number | null;
+  activity?: string;
+  constraints?: TaskConstraints;
+  maxRuntimeMs?: number;
+  verification?: { passed: boolean; detail: string } | null;
+  /** Most recent normalized activity; what the Island shows under the provider name. */
+  latestEvent?: { type: string; detail: string; at: number; label?: string; actor?: "provider" | "bunny" } | null;
+  progress?: TaskProgress | null;
+  /** Token counts reported by the provider for this run. */
+  usage?: TokenUsage | null;
+  /** Last observed process tree of the owned session (root first). */
+  processTree?: ProcessInfo[] | null;
+  processTreeAt?: number | null;
+  stopReason?: string | null;
+  feedback?: "positive" | "negative" | null;
+  retries?: number;
+  /** Independent check Bunny-A runs itself after the provider exits successfully. */
+  verify?: VerifySpec | null;
+};
+
+/** Determinate only when the provider published a finite plan; otherwise indeterminate. Never time-based. */
+export type TaskProgress =
+  | { kind: "determinate"; completed: number; total: number; source: string; current?: string | null }
+  | { kind: "indeterminate"; source?: string };
+
+export type TokenUsage = { inputTokens: number; outputTokens: number; cachedInputTokens: number; source: string };
+
+export type ProcessInfo = { pid: number; ppid: number; name: string; createdAt: number | null };
+
+export type VerifySpec =
+  | { kind: "file"; name: string; expected: string }
+  | { kind: "python"; name: string; expected: string };
+
+export type TaskConstraints = {
+  localOnly?: boolean;
+  offlineOnly?: boolean;
+  providerAllowlist?: ProviderId[];
+  providerDenylist?: ProviderId[];
+  requiresFilesystem?: boolean;
+  requiresTerminal?: boolean;
+  requiresGit?: boolean;
+  requiresGPU?: boolean;
+  /** Must run in exactly this approved folder. */
+  workingDirectory?: string;
+  maxRuntimeMs?: number;
 };
 
 export type GpuSample = {
@@ -112,7 +244,7 @@ export type HostSample = {
   notes: string[];
 };
 
-export type HostPresence = "online" | "sleeping";
+export type HostPresence = "online" | "offline" | "sleeping";
 
 export type ExecRequest = {
   taskId: string;

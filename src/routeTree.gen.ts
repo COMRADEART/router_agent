@@ -10,33 +10,43 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ApiBunnyPairRouteImport } from './routes/api/bunny-pair'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiBunnyPairRoute = ApiBunnyPairRouteImport.update({
+  id: '/api/bunny-pair',
+  path: '/api/bunny-pair',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/api/bunny-pair': typeof ApiBunnyPairRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/api/bunny-pair': typeof ApiBunnyPairRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/api/bunny-pair': typeof ApiBunnyPairRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/'
+  fullPaths: '/' | '/api/bunny-pair'
   fileRoutesByTo: FileRoutesByTo
-  to: '/'
-  id: '__root__' | '/'
+  to: '/' | '/api/bunny-pair'
+  id: '__root__' | '/' | '/api/bunny-pair'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  ApiBunnyPairRoute: typeof ApiBunnyPairRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -48,11 +58,19 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/bunny-pair': {
+      id: '/api/bunny-pair'
+      path: '/api/bunny-pair'
+      fullPath: '/api/bunny-pair'
+      preLoaderRoute: typeof ApiBunnyPairRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  ApiBunnyPairRoute: ApiBunnyPairRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

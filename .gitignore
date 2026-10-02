@@ -3,3 +3,18 @@ node_modules/
 .github_repo
 .env
 .env.*
+test-results/
+screenshots/
+.grok/dev.log
+.grok/dev-error.log
+.grok/preview-windows.pid
+.grok/preview-windows.log
+releases/
+
+.bunny-a/
+artifacts/bunny-takeover/
+artifacts/branding-before-bunny-a/
+
+# Generated build output and local preservation archives
+.vercel/output/
+artifacts/checkpoints/
