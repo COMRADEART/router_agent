@@ -1,5 +1,5 @@
 import type { MissionSnapshot } from "../bunny-missions/types.ts";
-import type { Mode, OrchTask, Project, ProviderId, ProviderLive, HostSample, TaskConstraints, ProviderFeatures, TaskProgress, TokenUsage, UsageWindow, VerifySpec, ProcessInfo, TaskState } from "../orch/types.ts";
+import type { Mode, OrchTask, Project, ProviderId, ProviderLive, HostSample, TaskConstraints, ProviderFeatures, TaskProgress, TokenUsage, UsageWindow, VerifySpec, ProcessInfo, TaskState, ProviderExecutionScope } from "../orch/types.ts";
 
 /** missionId is null for direct-task and system events (and for every event written before schema v3). */
 export type HostEvent = { sequence: number; at: number; type: string; taskId: string | null; detail: string; missionId?: string | null };
@@ -26,7 +26,7 @@ export type HostSnapshot = {
   /** M-A-0 mission layer. Optional: older clients ignore it; when missions are disabled it reports enabled:false. */
   missions?: MissionSnapshot;
 };
-export type SubmitTask = { prompt: string; mode: Mode; projectId?: string | null; override?: ProviderId | "auto"; constraints?: TaskConstraints; verify?: VerifySpec | null };
+export type SubmitTask = { prompt: string; mode: Mode; projectId?: string | null; override?: ProviderId | "auto"; constraints?: TaskConstraints; verify?: VerifySpec | null; executionScope?: ProviderExecutionScope };
 export type AdapterResult = { ok: boolean; output: string; error?: string; stopped?: boolean; exitCode?: number | null };
 export type AdapterHooks = {
   event: (type: string, detail: string) => void;

@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
-import { delimiter, dirname, extname, join } from "node:path";
+import { existsSync, realpathSync, statSync } from "node:fs";
+import { delimiter, dirname, extname, join, resolve } from "node:path";
 
 /** How a command is actually launched: always a real executable plus argv, never a shell string. */
 export type Resolved = { file: string; prefix: string[]; display: string };
@@ -21,20 +21,23 @@ function onPath(name: string): string | null {
  * Resolves a command name to an executable. npm/npx run through this Node's bundled npm CLI so no
  * `.cmd` shim (and therefore no cmd.exe shell) is involved. Scripts (.cmd/.bat/.ps1) are refused.
  */
-export function resolveCommand(command: string): Resolved | null {
+export function resolveCommand(command: string, cwd = process.cwd()): Resolved | null {
   const name = command.trim();
   if (!name || /[\s|&;<>^`$]/.test(name) && !/^[A-Za-z]:\\/.test(name)) return null;
   if (/\.(cmd|bat|ps1|vbs|js|mjs)$/i.test(name)) return null;
   const lower = name.toLowerCase().replace(/\.exe$/, "");
-  if (lower === "node") return { file: process.execPath, prefix: [], display: "node" };
+  if (lower === "node") return { file: realpathSync(process.execPath), prefix: [], display: "node" };
   if (lower === "npm" || lower === "npx") {
     const cli = join(dirname(process.execPath), "node_modules", "npm", "bin", `${lower}-cli.js`);
-    if (existsSync(cli)) return { file: process.execPath, prefix: [cli], display: lower };
+    if (existsSync(cli)) return { file: realpathSync(process.execPath), prefix: [realpathSync(cli)], display: lower };
     return null;
   }
-  if (/[\\/]/.test(name)) return existsSync(name) && statSync(name).isFile() && (process.platform !== "win32" || /\.(exe|com)$/i.test(name)) ? { file: name, prefix: [], display: name } : null;
+  if (/[\\/]/.test(name)) {
+    const path = resolve(cwd, name);
+    return existsSync(path) && statSync(path).isFile() && (process.platform !== "win32" || /\.(exe|com)$/i.test(name)) ? { file: realpathSync(path), prefix: [], display: name } : null;
+  }
   const found = onPath(name);
-  return found ? { file: found, prefix: [], display: lower } : null;
+  return found ? { file: realpathSync(found), prefix: [], display: lower } : null;
 }
 
 export type RunResult = { exitCode: number | null; stdout: string; stderr: string; durationMs: number; timedOut: boolean; aborted: boolean };
@@ -66,7 +69,7 @@ export function runProcess(resolved: Resolved, args: string[], options: { cwd: s
 }
 
 export async function runCommand(command: string, args: string[], options: { cwd: string; signal: AbortSignal; timeoutMs: number; maxOutput?: number }): Promise<RunResult> {
-  const resolved = resolveCommand(command);
+  const resolved = resolveCommand(command, options.cwd);
   if (!resolved) throw new Error(`Command "${command}" is not an executable Bunny-A can launch without a shell.`);
   return runProcess(resolved, args, options);
 }

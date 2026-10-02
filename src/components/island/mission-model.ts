@@ -98,10 +98,17 @@ export function scopeSummary(mission: MissionView): string[] {
   return [
     `Folder: ${scope.projectRoots.join(", ")}${scope.filesystem.write.length ? " (read & write)" : " (read only)"}`,
     scope.providers.execution ? `AI agents: up to ${scope.budget.maxExternalModelCalls} cloud call${scope.budget.maxExternalModelCalls === 1 ? "" : "s"}${scope.providers.localOnly ? " · local only" : ""}` : "No AI model calls",
+    scope.providers.execution ? `Agent steps: ${mission.steps.filter((step) => step.executor.kind === "model" && step.state !== "completed").map((step) => `${step.role} (${step.scope.access === "read" ? "read only" : "write & shell capable"})`).join(", ")}` : null,
+    scope.providers.sessions ? `Provider sessions: up to ${scope.providers.sessions.maxSessions}, including retries` : null,
+    scope.providers.execution ? "Agent file and command actions use provider permissions. Read steps cannot write; write steps can edit files and run shell commands. External effects inside an agent session are governed by the provider; Bunny capability actions ask separately." : null,
     scope.terminal.enabled ? `Commands: ${scope.terminal.commands.join(", ")}` : null,
     scope.git.actions.length ? `Git: ${scope.git.actions.join(", ")}` : null,
     scope.browser.enabled ? "Bunny browser (isolated profile)" : null,
     scope.computer.enabled ? "Desktop control (UI Automation)" : null,
     `Time limit: ${Math.round(scope.budget.maxRuntimeMs / 60_000)} min · always asks for ${scope.alwaysAsk.map((risk) => risk.toLowerCase().replaceAll("_", " ")).join(" and ")}`,
   ].filter((line): line is string => !!line);
+}
+
+export function permissionLabel(mission: MissionView, stepId: string): string {
+  return mission.steps.find((step) => step.id === stepId)?.executor.kind === "skill" ? "Allow this skill run" : "Allow once";
 }

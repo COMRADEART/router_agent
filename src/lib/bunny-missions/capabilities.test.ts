@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -16,6 +16,7 @@ import { ComputerCapability } from "./capabilities/computer.server.ts";
 import { resolveCommand } from "./capabilities/process.server.ts";
 import { SkillLibrary } from "./skills.server.ts";
 import { communicationConnectors } from "./capabilities/connectors.server.ts";
+import { envelopeFrom, scopeFor } from "./authorization.server.ts";
 
 function harness() {
   const dir = mkdtempSync(join(tmpdir(), "bunny-cap-"));
@@ -69,6 +70,30 @@ test("terminal capability runs argv without a shell, bounds time and escalates d
     const destructive = await h.bus.request(h.request("terminal.exec", { command: "git", args: ["clean", "-fdx"] }));
     assert.equal(destructive.decision.decision, "ask"); assert.equal(destructive.run, null, "nothing executed while asking");
   } finally { await h.cleanup(); }
+});
+
+test("MA0R: same-basename rogue executable and changed PATH cannot inherit an approved executable identity", async () => {
+  const h = harness(); const originalPath = process.env.PATH;
+  const commandScope = (command: string) => envelopeFrom(scopeFor([{ executor: { kind: "capability", action: "terminal.exec", params: { command } }, scope: { root: h.root, access: "write", isolation: "shared" }, providerConstraints: {}, verification: [], requiredCapabilities: [] }], h.root, "fast"), "identity-test", "workstation", 60_000);
+  try {
+    h.bus.register(new TerminalCapability()); await h.bus.refreshHealth();
+    const envelope = commandScope("node");
+    const rogueDirectory = join(h.root, "rogue"); mkdirSync(rogueDirectory);
+    const rogue = join(rogueDirectory, process.platform === "win32" ? "node.exe" : "node"); copyFileSync(process.execPath, rogue);
+    const request = { missionId: envelope.missionId, envelope, direct: undefined };
+    const blocked = await h.bus.request(h.request("terminal.exec", { command: rogue, args: ["-e", "console.log('ROGUE')"] }, request));
+    assert.equal(blocked.decision.decision, "ask"); assert.equal(blocked.run, null); assert.match(blocked.decision.reason, /executable identity/);
+    const normal = await h.bus.request(h.request("terminal.exec", { command: "node", args: ["-e", "console.log('TRUSTED')"] }, request));
+    assert.equal(normal.run?.status, "succeeded");
+    // An explicitly approved path still works; trust is to that exact path, not its basename.
+    const explicit = commandScope(rogue);
+    assert.equal(h.bus.decision(h.request("terminal.exec", { command: rogue }, { ...request, envelope: explicit })).decision, "allow");
+    const gitScope = commandScope("git");
+    copyFileSync(process.execPath, join(rogueDirectory, process.platform === "win32" ? "git.exe" : "git"));
+    process.env.PATH = `${rogueDirectory}${process.platform === "win32" ? ";" : ":"}${originalPath}`;
+    const changedPath = h.bus.decision(h.request("terminal.exec", { command: "git" }, { ...request, envelope: gitScope }));
+    assert.equal(changedPath.decision, "ask"); assert.match(changedPath.reason, /executable identity/);
+  } finally { process.env.PATH = originalPath; await h.cleanup(); }
 });
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", windowsHide: true });
@@ -238,6 +263,23 @@ test("Host HTTP: snapshot stays backward compatible, mission commands are valida
     assert.match((await command("capability.run", { action: "terminal.exec", params: { command: "node" } }, device.token)).body.error, /workstation/);
     assert.match((await command("mission.create", { objective: "x", mode: "fast", steps: [{ role: "A", objective: "b" }] }, device.token)).body.error, /workstation/);
     assert.match((await command("trigger.create", { name: "t" }, device.token)).body.error, /workstation/);
+    const modelPlan = [{ role: "Custom", objective: "inspect", access: "read", executor: { kind: "model" } }, { role: "Research", objective: "edit", access: "write", executor: { kind: "model" }, dependsOn: [0] }];
+    const desktopMission = (await command("mission.create", { objective: "Desktop scope", mode: "fast", steps: modelPlan })).body.mission;
+    const phoneMission = (await command("mission.create", { objective: "Phone scope", mode: "fast", steps: modelPlan })).body.mission;
+    // Serialize through the actual HTTP boundary, without starting any model session.
+    const desktopApproval = await command("mission.approve", { id: desktopMission.id, start: false });
+    const phoneApproval = await command("mission.approve", { id: phoneMission.id, start: false, providers: { execution: true, sessions: { maxSessions: 999 } }, projectRoots: ["/"] }, device.token);
+    assert.equal(desktopApproval.status, 200); assert.equal(phoneApproval.status, 200);
+    const desktopEnvelope = (await command("mission.get", { id: desktopMission.id })).body.data.authorization;
+    const phoneEnvelope = (await command("mission.get", { id: phoneMission.id }, device.token)).body.data.authorization;
+    assert.deepEqual(phoneEnvelope.providers, phoneMission.requestedScope.providers, "phone grants exactly the displayed serialized provider authority");
+    assert.deepEqual(phoneEnvelope.projectRoots, desktopEnvelope.projectRoots);
+    assert.equal(phoneEnvelope.providers.sessions.maxSessions, desktopEnvelope.providers.sessions.maxSessions);
+    assert.deepEqual(phoneEnvelope.providers.sessions.steps.map((step: { scope: unknown }) => step.scope), desktopEnvelope.providers.sessions.steps.map((step: { scope: unknown }) => step.scope));
+    assert.match(phoneEnvelope.grantedBy, /^device:/);
+    const phoneEvents = (await command("mission.get", { id: phoneMission.id }, device.token)).body.data.events;
+    assert.ok(phoneEvents.some((event: { type: string }) => event.type === "approval.mission_envelope"));
+    assert.ok(phoneEvents.some((event: { type: string }) => event.type === "approval.remote_device"));
     const stopped = await command("mission.stop", { id: created.body.mission.id }, device.token);
     assert.equal(stopped.body.mission.state, "stopped", "a paired phone can stop a mission");
     assert.match((await command("capability.grant", { action: "*", policy: "always_allow" })).body.error, /blanket allow/);

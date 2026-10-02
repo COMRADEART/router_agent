@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import { appendFileSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { canTransition } from "../orch/machine.ts";
-import type { OrchTask, Project, ProviderId, ProviderLive, TaskState, HostSample, TaskProgress, TokenUsage, ProcessInfo } from "../orch/types.ts";
+import type { OrchTask, Project, ProviderId, ProviderLive, TaskState, HostSample, TaskProgress, TokenUsage, ProcessInfo, ProviderExecutionScope } from "../orch/types.ts";
 import { HostDatabase } from "./persistence.server.ts";
 import { bunnyRoute, eligibility, inferredConstraints } from "./router.ts";
 import { defaultAdapters } from "./adapters.server.ts";
@@ -47,6 +47,8 @@ export class TaskManager {
   readProcesses: () => Promise<ProcessInfo[]>;
   /** Host-owned folders (mission worktrees) a delegated child task may use as its working directory. */
   workspaceRoots: string[]=[];
+  /** Installed by the mission owner; checked for direct approvals of pending children too. */
+  missionScopeCheck: ((task: OrchTask) => string | null) | null=null;
   constructor(db: HostDatabase,defaultRoot: string,adapters?: ProviderAdapter[],options: ManagerOptions={}) {
     this.db=db;this.defaultRoot=realpathSync(defaultRoot);
     this.policy=new PolicyEngine(db);
@@ -71,6 +73,8 @@ export class TaskManager {
     this.stop(id,detail).catch(error=>{try {this.emit(this.db.event("task.stop_failed",id,error instanceof Error ? error.message : String(error)));} catch { /* Database closed during shutdown. */ }});
   }
   update(task: OrchTask,patch: Partial<OrchTask>,type: string,detail: string,quiet=false): OrchTask {
+    const owned=this.db.get(task.id);
+    if(JSON.stringify(Object.hasOwn(patch,"executionScope") ? patch.executionScope : task.executionScope)!==JSON.stringify(owned.executionScope) || JSON.stringify(Object.hasOwn(patch,"mission") ? patch.mission : task.mission)!==JSON.stringify(owned.mission)) throw new Error("Task execution authority and mission ownership are immutable; submit a new approved task.");
     if(patch.state && patch.state!==task.state && !canTransition(task.state,patch.state)) throw new Error(`Invalid transition ${task.state} → ${patch.state}`);
     const next={...task,...patch,logs:quiet ? task.logs : [...task.logs,{at:Date.now(),line:detail}].slice(-500)};
     this.emit(this.db.write(next,type,detail));return next;
@@ -126,7 +130,10 @@ export class TaskManager {
    * `delegated` is only passed in-process by the MissionManager (never from HTTP input): it links the
    * child task to its mission step and may place it in a Host-owned mission workspace.
    */
-  submit(input: SubmitTask,delegated?: {missionId:string;stepId:string;cwd?:string|null}): OrchTask {
+  submit(input: SubmitTask,delegated?: {missionId:string;stepId:string;cwd?:string|null;executionScope:ProviderExecutionScope}): OrchTask {
+    const scope=delegated?.executionScope ?? input.executionScope;
+    if(delegated && !scope || scope && !["read","write"].includes(scope.access)) throw new Error("Invalid or missing provider execution scope.");
+    const executionScope=scope ? {access:scope.access} : undefined;
     const constraints=inferredConstraints(input.prompt,input.constraints);
     let project=input.projectId ? this.db.projects().find(p=>p.id===input.projectId) ?? null : null;
     if(input.projectId && !project) throw new Error("Project is not registered on this Host.");
@@ -148,6 +155,7 @@ export class TaskManager {
     const live=this.live();const policy=this.policy.active();
     const decision=bunnyRoute({...input,providers:live,constraints,policyId:policy.id,learned:id=>this.policy.adjustment(live.find(p=>p.id===id)!,input.prompt,input.mode,policy)});
     const task: OrchTask={id:crypto.randomUUID(),...(delegated ? {mission:{missionId:delegated.missionId,stepId:delegated.stepId}} : {}),title:input.prompt.trim().split("\n")[0].slice(0,80),prompt:input.prompt,mode:input.mode,projectId:project?.id ?? null,cwd,state:"queued",provider:decision.recommended_provider,model:decision.recommended_model,decision,manual:!!input.override && input.override!=="auto",createdAt:Date.now(),startedAt:null,finishedAt:null,output:"",error:null,logs:[],pauseSupported:false,sessionId:null,pid:null,exitCode:null,constraints,maxRuntimeMs:constraints.maxRuntimeMs ?? 120000,verify:input.verify ?? null,latestEvent:null,progress:null,usage:null,processTree:null,retries:0};
+    if(executionScope) task.executionScope=executionScope;
     this.emit(this.db.write(task,"task.created","Task created on Bunny-A Host."));
     const routing=this.update(task,{state:"routing"},"routing.started","Routing with readiness and hard constraints.");
     return this.update(routing,{state:"waiting_for_approval",activity:"Waiting for approval"},"approval.required",decision.reason);
@@ -168,8 +176,10 @@ export class TaskManager {
     return {type,detail:clip(detail),at:Date.now(),label:activityLabel(type),actor};
   }
   /** Direct user approval. Unchanged contract: launches exactly one task that is waiting for approval. */
-  approve(id: string): OrchTask {
-    return this.launch(id,{kind:"user",at:Date.now()},"approval.accepted","User approved this task and execution root.");
+  approve(id: string,by="workstation"): OrchTask {
+    const launched=this.launch(id,{kind:"user",at:Date.now()},"approval.accepted","User approved this task and execution root.");
+    if(by.startsWith("device:")) this.emit(this.db.event("approval.remote_device",id,`Direct task approval by ${by}.`));
+    return launched;
   }
   /**
    * Mission-delegated approval: the user approved the mission's authorization envelope, not this child.
@@ -184,6 +194,9 @@ export class TaskManager {
   }
   private launch(id: string,approval: NonNullable<OrchTask["approval"]>,approvalEvent: string,approvalDetail: string): OrchTask {
     const task=this.db.get(id);if(task.state!=="waiting_for_approval") throw new Error("Task is not awaiting approval; duplicate launches are refused.");
+    if(task.mission && !task.executionScope) throw new Error("Legacy mission child has no provider execution authority; replan and approve the mission again.");
+    if(task.mission) { const outside=this.missionScopeCheck ? this.missionScopeCheck(task) : "mission scope validator is unavailable"; if(outside) throw new Error(`Outside mission execution scope: ${outside}`); }
+    if(task.executionScope && !["read","write"].includes(task.executionScope.access)) throw new Error("Invalid provider execution authority.");
     const provider=this.live().find(p=>p.id===task.provider);if(!provider) throw new Error("Executor is no longer eligible. Route again.");
     const blocked=eligibility(provider,task.constraints ?? {});if(blocked) throw new Error(`Executor is no longer eligible: ${blocked} Route again.`);
     const adapter=this.adapters.find(a=>a.id===task.provider);if(!adapter) throw new Error("Adapter unsupported.");
@@ -204,7 +217,12 @@ export class TaskManager {
     const record=this.transcript(id);
     let session:RunningSession;
     try {
-      session=adapter.launch(launching,{
+      // Adapters receive a detached, immutable authority snapshot, never the persisted task object.
+      const adapterTask=structuredClone(launching);
+      if(adapterTask.executionScope) Object.freeze(adapterTask.executionScope);
+      if(adapterTask.mission) Object.freeze(adapterTask.mission);
+      Object.freeze(adapterTask);
+      session=adapter.launch(adapterTask,{
         event:(type,detail)=>{
           // Output that arrived first is written first, so the latest activity is really the latest.
           flush();

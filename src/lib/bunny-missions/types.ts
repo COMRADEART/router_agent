@@ -1,4 +1,4 @@
-import type { Mode, ProviderId, TaskProgress, VerifySpec } from "../orch/types.ts";
+import type { Mode, ProviderId, ProviderExecutionScope, TaskProgress, VerifySpec } from "../orch/types.ts";
 
 /**
  * Bunny-A M-A-0 mission contracts. A mission sits above TaskManager: it owns a bounded step graph,
@@ -94,10 +94,14 @@ export type AuthorizationEnvelope = {
   riskClasses: RiskClass[];
   /** Capability action ids or prefixes ("filesystem.*"). */
   capabilities: string[];
-  providers: { execution: boolean; allow: ProviderId[] | null; localOnly: boolean };
+  providers: {
+    execution: boolean; allow: ProviderId[] | null; localOnly: boolean;
+    /** Optional on pre-remediation JSON. Missing authority never permits delegated model launches. */
+    sessions?: { steps: { stepId: string; scope: ProviderExecutionScope }[]; maxSessions: number; writeIncludesShell: true };
+  };
   filesystem: { read: string[]; write: string[] };
   browser: { enabled: boolean; domains: string[] | "public" };
-  terminal: { enabled: boolean; commands: string[] };
+  terminal: { enabled: boolean; commands: string[]; executables?: { command: string; file: string; prefix: string[] }[] };
   git: { actions: GitAction[] };
   network: { allowed: boolean };
   computer: { enabled: boolean };
@@ -180,7 +184,7 @@ export type MissionStep = {
   failure: { category: FailureCategory; detail: string } | null;
   accounting: StepAccounting;
   pendingRequestId: string | null;
-  /** Which phase the pending request blocks, and a one-time allowance the user granted for one action. */
+  /** Pending phase; one capability invocation or matching actions in one skill run (see approval UI). */
   pendingPhase: "execute" | "verify" | null;
   approvedOnce: { requestId: string; action: string } | null;
   startedAt: number | null;
@@ -376,9 +380,11 @@ export type CapabilityResult = {
   before?: unknown;
   after?: unknown;
   errorCategory?: FailureCategory;
+  cleanup?: { attempted: boolean; ok: boolean; detail: string };
 };
 
 export type CapabilityRun = {
+  cleanup?: { attempted: boolean; ok: boolean; detail: string };
   id: string;
   action: string;
   capability: string;

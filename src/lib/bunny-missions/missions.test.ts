@@ -1,12 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { HostDatabase } from "../bunny-host/persistence.server.ts";
 import { TaskManager } from "../bunny-host/manager.server.ts";
-import { providerBase } from "../bunny-host/adapters.server.ts";
+import { providerBase, codexLaunchArgs, claudeLaunchArgs } from "../bunny-host/adapters.server.ts";
 import type { AdapterHooks, AdapterResult, ProviderAdapter } from "../bunny-host/contracts.ts";
 import type { OrchTask, ProviderId, ProviderLive } from "../orch/types.ts";
 import { MissionManager } from "./manager.server.ts";
@@ -17,6 +17,8 @@ import { deterministicPlan, explicitPlan, planMission } from "./planner.server.t
 import { DEFAULT_CONFIG, redact } from "./store.server.ts";
 import { WorkspaceCoordinator } from "./workspace.server.ts";
 import { agentPrompt } from "./context.ts";
+import { missionCommand } from "./commands.server.ts";
+import { BUILTIN_SKILLS } from "./skills.server.ts";
 import type { CapabilityAdapter } from "./capabilities/bus.server.ts";
 import { FilesystemCapability, NotificationsCapability, TerminalCapability } from "./capabilities/local.server.ts";
 import { communicationConnectors } from "./capabilities/connectors.server.ts";
@@ -228,6 +230,191 @@ test("model steps flow through TaskManager with delegated approval; direct appro
     env.launched[1].finish({ ok: true, output: "direct done" });
   } finally { await env.cleanup(); }
 });
+
+for (const provider of ["codex", "claude"] as const) test(`MA0R: custom read scope reaches ${provider} launch restrictions; role names grant nothing`, async () => {
+  const env = await setup({ providers: [provider] });
+  try {
+    const view = env.missions.create({ objective: "Inspect", mode: "fast", origin: "workstation", steps: [model("Custom auditor", "Inspect files", [], { access: "read" })] });
+    const approved = env.missions.approve(view.id, "workstation");
+    await until(() => env.launched.length === 1, "read child");
+    const child = env.launched[0].task;
+    assert.deepEqual(child.executionScope, { access: "read" });
+    const envelope = env.missions.store.authorization(approved.authorizationId!)!;
+    assert.deepEqual(envelope.providers.sessions?.steps, [{ stepId: view.steps[0].id, scope: { access: "read" } }]);
+    assert.equal(envelope.filesystem.write.length, 0);
+    if (provider === "codex") assert.equal(codexLaunchArgs(child)[3], "read-only");
+    else {
+      const args = claudeLaunchArgs(child, "test-session");
+      assert.equal(args[args.indexOf("--tools") + 1], "Read");
+      assert.equal(args[args.indexOf("--allowedTools") + 1], "Read");
+      assert.equal(args[args.indexOf("--permission-mode") + 1], "dontAsk");
+      assert.ok(args.includes("--restricted"));
+      assert.ok(!args.includes("acceptEdits"));
+    }
+    assert.throws(() => { child.executionScope!.access = "write"; }, TypeError, "provider cannot mutate its scope snapshot");
+    assert.throws(() => { child.executionScope = { access: "write" }; }, TypeError);
+    assert.throws(() => env.tasks.update(env.db.get(child.id), { executionScope: { access: "write" } }, "agent.output", "upgrade"), /immutable/);
+    assert.throws(() => env.tasks.update(env.db.get(child.id), { executionScope: undefined }, "agent.output", "remove"), /immutable/);
+    assert.deepEqual(env.db.get(child.id).executionScope, { access: "read" });
+    env.launched[0].finish({ ok: true, output: "Read evidence" });
+    await until(() => env.missions.mission(view.id).state === "completed", "done");
+  } finally { await env.cleanup(); }
+});
+
+test("MA0R: explicit Research write scope has write/shell authority; unscoped direct tasks retain launch defaults", async () => {
+  const env = await setup({ providers: ["codex"] });
+  try {
+    const view = env.missions.create({ objective: "Edit", mode: "fast", origin: "workstation", steps: [model("Research", "Edit file", [], { access: "write" })] });
+    env.missions.approve(view.id, "workstation");
+    await until(() => env.launched.length === 1, "writer");
+    const child = env.launched[0].task;
+    assert.deepEqual(child.executionScope, { access: "write" });
+    assert.equal(codexLaunchArgs(child)[3], "workspace-write");
+    assert.ok(claudeLaunchArgs(child, "session").includes("acceptEdits"));
+    const direct = env.tasks.submit({ prompt: "Direct", mode: "fast" });
+    assert.equal(direct.executionScope, undefined);
+    assert.equal(codexLaunchArgs(direct)[3], "workspace-write");
+    const directArgs = claudeLaunchArgs(direct, "session", "win32");
+    assert.equal(directArgs[directArgs.indexOf("--allowedTools") + 1], "Read,Write,Edit,Bash,PowerShell");
+    assert.ok(!directArgs.includes("--restricted"));
+    env.launched[0].finish({ ok: true, output: "Done" });
+    await until(() => env.missions.mission(view.id).state === "completed", "done");
+  } finally { await env.cleanup(); }
+});
+
+test("MA0R: Codex to Claude reroute and explicit retry retain read authority", async () => {
+  const env = await setup({ providers: ["codex", "claude"] });
+  try {
+    // Route to Codex first; changing provider never changes the stored scope.
+    const view = env.missions.create({ objective: "Inspect", mode: "balanced", origin: "workstation", steps: [model("Auditor", "Inspect TypeScript source", [], { access: "read", maxRetries: 1 })] });
+    const approved = env.missions.approve(view.id, "workstation", false);
+    const envelope = env.missions.store.authorization(approved.authorizationId!)!;
+    env.missions.store.saveAuthorization({ ...envelope, expiresAt: Date.now() - 1 });
+    env.missions.start(env.missions.mission(view.id));
+    await until(() => env.missions.store.requests(view.id).length === 1, "pending provider approval");
+    const pending = env.db.get(env.missions.store.steps(view.id)[0].taskId!);
+    env.tasks.retarget(pending.id, "codex");
+    env.tasks.retarget(pending.id, "claude");
+    assert.deepEqual(env.db.get(pending.id).executionScope, { access: "read" });
+    env.missions.store.saveAuthorization(envelope);
+    await env.missions.respond(env.missions.store.requests(view.id)[0].id, "allow_once", "workstation");
+    await until(() => env.launched.length === 1, "Claude reroute");
+    assert.equal(env.launched[0].task.provider, "claude");
+    assert.equal(claudeLaunchArgs(env.launched[0].task, "session")[claudeLaunchArgs(env.launched[0].task, "session").indexOf("--tools") + 1], "Read");
+    env.launched[0].finish({ ok: false, output: "", error: "provider crashed" });
+    await until(() => env.launched.length === 2, "automatic retry");
+    assert.deepEqual(env.launched[1].task.executionScope, { access: "read" });
+    env.launched[1].finish({ ok: false, output: "", error: "provider crashed again" });
+    await until(() => env.missions.mission(view.id).state === "failed", "failure");
+    env.missions.retry(view.id, "workstation");
+    await until(() => env.launched.length === 3, "explicit retry");
+    assert.deepEqual(env.launched[2].task.executionScope, { access: "read" });
+    env.launched[2].finish({ ok: true, output: "Read" });
+    await until(() => env.missions.mission(view.id).state === "completed", "done");
+  } finally { await env.cleanup(); }
+});
+
+test("MA0R: replan with write authority revokes read approval and cannot run until new approval", async () => {
+  const env = await setup();
+  try {
+    const view = env.missions.create({ objective: "Inspect", mode: "fast", origin: "workstation", steps: [model("A", "Inspect", [], { access: "read", maxRetries: 0 })] });
+    const approved = env.missions.approve(view.id, "workstation");
+    await until(() => env.launched.length === 1, "reader");
+    env.launched[0].finish({ ok: false, output: "", error: "failed" });
+    await until(() => env.missions.mission(view.id).state === "failed", "failed");
+    const next = await env.missions.replan(view.id, "workstation", [model("A", "Edit", [], { access: "write" })]);
+    assert.equal(next.state, "waiting_for_approval");
+    assert.equal(next.authorizationId, null);
+    assert.ok(env.missions.store.authorization(approved.authorizationId!)?.revokedAt);
+    await env.missions.tick(view.id);
+    assert.equal(env.launched.length, 1, "new write step cannot use the old read approval");
+    assert.throws(() => env.missions.retry(view.id, "workstation"));
+    env.missions.approve(view.id, "workstation");
+    await until(() => env.launched.length === 2, "newly approved writer");
+    assert.deepEqual(env.launched[1].task.executionScope, { access: "write" });
+    env.launched[1].finish({ ok: true, output: "Done" });
+    await until(() => env.missions.mission(view.id).state === "completed", "done");
+  } finally { await env.cleanup(); }
+});
+
+test("MA0R: child <= step <= envelope is enforced even on direct child approval", async () => {
+  const env = await setup();
+  try {
+    const view = env.missions.create({ objective: "Inspect", mode: "fast", origin: "workstation", steps: [model("A", "Inspect", [], { access: "read" })] });
+    const approved = env.missions.approve(view.id, "workstation", false);
+    const delegation = { missionId: view.id, stepId: view.steps[0].id, cwd: env.root, executionScope: { access: "write" as const } };
+    const excessive = env.tasks.submit({ prompt: "Forged write child", mode: "fast" }, delegation);
+    assert.throws(() => env.tasks.approve(excessive.id), /child exceeds/);
+    env.missions.setStep(view.steps[0], { scope: { ...view.steps[0].scope, access: "write" } });
+    const read = env.tasks.submit({ prompt: "Read child", mode: "fast" }, { ...delegation, executionScope: { access: "read" } });
+    assert.throws(() => env.tasks.approve(read.id), /step exceeds/);
+    assert.equal(env.launched.length, 0);
+    const persisted = env.missions.store.authorization(approved.authorizationId!)!;
+    assert.equal(persisted.providers.sessions!.steps[0].scope.access, "read");
+  } finally { await env.cleanup(); }
+});
+
+test("MA0R: phone approval serializes exactly the desktop authority and ignores client scope overrides", async () => {
+  const env = await setup();
+  try {
+    const view = env.missions.create({ objective: "Inspect then edit", mode: "fast", origin: "workstation", steps: [model("A", "Inspect", [], { access: "read" }), model("B", "Edit", [0], { access: "write" })] });
+    const before = JSON.parse(JSON.stringify(view.requestedScope));
+    await missionCommand(env.missions, "mission.approve", { id: view.id, start: false, scope: { projectRoots: ["C:/"], providers: { execution: true } } }, { local: false, actor: "device:paired-phone" });
+    const envelope = JSON.parse(JSON.stringify(env.missions.get(view.id).authorization)) as Record<string, unknown>;
+    for (const key of ["id", "missionId", "grantedAt", "grantedBy", "expiresAt", "revokedAt"]) delete envelope[key];
+    assert.deepEqual(envelope, before, "remote command uses Host-owned requested scope only");
+    assert.ok(env.missions.get(view.id).events.some((event) => event.type === "approval.mission_envelope"));
+    assert.ok(env.missions.get(view.id).events.some((event) => event.type === "approval.remote_device" && /paired-phone/.test(event.detail)));
+  } finally { await env.cleanup(); }
+});
+
+test("MA0R: Allow this skill run covers matching actions in that run, within approved roots, and clears on completion", async () => {
+  const env = await setup();
+  try {
+    const skill = { ...structuredClone(BUILTIN_SKILLS[0]), id: "test.two-writes", name: "Two writes", requirements: ["filesystem.write"], preconditions: [],
+      steps: [{ action: "filesystem.write", label: "write a", params: { path: "a.txt", content: "A" } }, { action: "filesystem.write", label: "write b", params: { path: "b.txt", content: "B" } }],
+      validations: [{ kind: "status_succeeded" as const, step: 0 }, { kind: "status_succeeded" as const, step: 1 }], cleanup: [] };
+    env.missions.store.saveSkill(skill, true);
+    const view = env.missions.create({ objective: "Skill", mode: "fast", origin: "workstation", steps: [{ role: "Skill", objective: "Run two writes", executor: { kind: "skill", skillId: skill.id, params: {} } }] });
+    const approved = env.missions.approve(view.id, "workstation", false);
+    const envelope = env.missions.store.authorization(approved.authorizationId!)!;
+    env.missions.store.saveAuthorization({ ...envelope, capabilities: envelope.capabilities.filter((action) => action !== "filesystem.write") });
+    env.missions.start(env.missions.mission(view.id));
+    await until(() => env.missions.store.requests(view.id).length === 1, "skill permission");
+    const request = env.missions.store.requests(view.id)[0];
+    assert.equal(env.missions.store.runs({ missionId: view.id }).length, 0, "no write before consent");
+    await env.missions.respond(request.id, "allow_once", "workstation");
+    await until(() => env.missions.mission(view.id).state === "completed", "skill finished");
+    assert.equal(readFileSync(join(env.root, "a.txt"), "utf8"), "A");
+    assert.equal(readFileSync(join(env.root, "b.txt"), "utf8"), "B");
+    assert.equal(env.missions.store.runs({ missionId: view.id }).filter((run) => run.action === "filesystem.write").length, 2);
+    assert.equal(env.missions.store.steps(view.id)[0].approvedOnce, null);
+    assert.ok(env.missions.get(view.id).events.some((event) => event.type === "approval.additional_capability" && /this skill run/.test(event.detail)));
+    assert.equal(env.missions.bus.decision({ action: "filesystem.write", params: { path: "c.txt", content: "C" }, missionId: view.id, stepId: view.steps[0].id, envelope: env.missions.store.authorization(approved.authorizationId!)!, origin: "test", cwd: env.root, roots: [env.root] }).decision, "ask", "consent does not persist to later runs");
+    const outside = await env.missions.skills.run(skill.id, {}, { missionId: view.id, stepId: view.steps[0].id, envelope, origin: "test", cwd: env.dir, roots: [env.root], oneTimeAction: "filesystem.write" });
+    assert.equal(outside.ok, false, "a skill-run allowance never widens path roots");
+    assert.ok(!existsSync(join(env.dir, "a.txt")));
+  } finally { await env.cleanup(); }
+});
+
+test("MA0R: direct capability/skill cwd is validated before adapter execution; no directories are created", async () => {
+  const env = await setup();
+  try {
+    writeFileSync(join(env.root, "file.txt"), "text");
+    const missing = join(env.root, "does-not-exist");
+    const invalid: unknown[] = ["", " ", "relative", missing, join(env.root, "file.txt"), env.dir, join(env.root, ".."), "https://example.com", `${env.root}\u0000bad`, null, 12];
+    if (process.platform === "win32") invalid.push("\\\\localhost\\C$\\Windows", "C:relative", `${env.root}:stream`);
+    for (const action of ["capability.run", "skill.run", "skill.verify"]) for (const cwd of invalid) await assert.rejects(missionCommand(env.missions, action, { cwd, action: "filesystem.list", id: "project.test", version: 1 }, { local: true, actor: "workstation" }));
+    assert.equal(env.missions.store.runs().length, 0, "invalid cwd never reaches a capability");
+    assert.ok(!existsSync(missing));
+    const escaped = join(env.root, "escape");
+    symlinkSync(env.dir, escaped, process.platform === "win32" ? "junction" : "dir");
+    await assert.rejects(missionCommand(env.missions, "capability.run", { cwd: escaped, action: "filesystem.list" }, { local: true, actor: "workstation" }), /outside/);
+    mkdirSync(join(env.root, "sub"));
+    const accepted = await missionCommand(env.missions, "capability.run", { cwd: join(env.root, "sub"), action: "filesystem.list" }, { local: true, actor: "workstation" });
+    assert.ok(accepted.data, "existing approved subfolders stay compatible");
+  } finally { await env.cleanup(); }
+});
 test("parallel-ready steps run concurrently; a dependent waits; results pass by reference", async () => {
   const env = await setup();
   try {
@@ -391,7 +578,9 @@ test("a deterministic skill mission carries its own commands in the envelope and
   try {
     writeFileSync(join(env.root, "package.json"), JSON.stringify({ scripts: { test: "node -e \"console.log('demo ok')\"" } }));
     const view = env.missions.create({ objective: "Run the tests", mode: "fast", origin: "workstation" });
-    assert.deepEqual(view.requestedScope?.terminal, { enabled: true, commands: ["npm"] });
+    assert.equal(view.requestedScope?.terminal.enabled, true);
+    assert.deepEqual(view.requestedScope?.terminal.commands, ["npm"]);
+    assert.ok(view.requestedScope?.terminal.executables?.length, "approval pins npm's real executable and CLI prefix");
     env.missions.approve(view.id, "workstation");
     await until(() => ["completed", "failed", "waiting_for_user"].includes(env.missions.mission(view.id).state), "skill mission", 30_000);
     assert.equal(env.missions.mission(view.id).state, "completed", JSON.stringify(env.missions.store.steps(view.id)[0].failure));
@@ -536,4 +725,31 @@ test("migration: a pre-M-A-0 database keeps every row and gains the additive sch
       db.close();
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("MA0R migration: old mission JSON stays byte-identical and missing provider authority fails closed", async () => {
+  const env = await setup();
+  try {
+    const view = env.missions.create({ objective: "Old approval", mode: "fast", origin: "workstation", steps: [model("Research", "inspect", [], { access: "read" })] });
+    const mission = env.missions.mission(view.id);
+    delete mission.requestedScope!.providers.sessions;
+    env.missions.store.saveMission(mission);
+    const envelope = envelopeFrom(mission.requestedScope!, view.id, "workstation", 60_000);
+    env.missions.store.saveAuthorization(envelope);
+    const direct = env.tasks.submit({ prompt: "Legacy direct", mode: "fast" });
+    const tables = ["tasks", "missions", "mission_steps", "mission_authorizations"];
+    const records = (db: HostDatabase) => tables.map((table) => db.db.prepare(`SELECT record FROM ${table} ORDER BY id`).all());
+    const before = records(env.db);
+    await env.missions.close(); env.db.close();
+    for (let reopen = 0; reopen < 2; reopen++) {
+      const db = new HostDatabase(join(env.dir, "host.sqlite")); const store = new MissionStore(db);
+      try {
+        assert.deepEqual(records(db), before, "no JSON records rewritten or upgraded");
+        assert.equal(db.get(direct.id).executionScope, undefined, "legacy direct tasks remain unscoped");
+        assert.equal(store.mission(view.id).requestedScope!.providers.sessions, undefined);
+        assert.match(taskViolation({ ...direct, cwd: env.root, mission: { missionId: view.id, stepId: view.steps[0].id }, executionScope: { access: "read" } }, store.authorization(envelope.id)!, false, 0, Date.now(), view.steps[0])!, /authority is missing/);
+      } finally { db.close(); }
+    }
+    assert.equal(env.launched.length, 0, "migration starts no provider");
+  } finally { await env.cleanup(); }
 });

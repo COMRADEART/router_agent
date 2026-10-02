@@ -112,7 +112,7 @@ export async function startHost(options: { dataDirectory?: string; root?: string
       if(typeof input.action==="string" && MISSION_ACTIONS.has(input.action)) extra=await missionCommand(missions,input.action,data,{local,actor:local ? "workstation" : `device:${device!.id}`});
       else switch(input.action) {
         case "submit": task=manager.submit(validateSubmit(data));break;
-        case "approve": task=manager.approve(text(data.id,200));break;
+        case "approve": task=manager.approve(text(data.id,200),local ? "workstation" : `device:${device!.id}`);break;
         case "stop": task=await manager.stop(text(data.id,200));break;
         case "retarget": task=manager.retarget(text(data.id,200),provider(data.provider));break;
         case "discover": await manager.discover();break;

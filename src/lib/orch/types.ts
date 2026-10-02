@@ -158,6 +158,12 @@ export type Project = {
 
 export type TaskLog = { at: number; line: string };
 
+/** Host-owned launch authority, independent of role names and routing preferences.
+ * `write` includes provider-managed command execution; `read` must forbid mutations.
+ * Absent only on unscoped legacy/direct tasks, whose launch behavior is unchanged.
+ */
+export type ProviderExecutionScope = { access: "read" | "write" };
+
 export type OrchTask = {
   id: string;
   title: string;
@@ -201,6 +207,7 @@ export type OrchTask = {
   mission?: { missionId: string; stepId: string } | null;
   /** Who launched it: a direct user approval or a mission-delegated approval under an authorization envelope. */
   approval?: { kind: "user" | "mission"; at: number; authorizationId?: string; missionId?: string; stepId?: string } | null;
+  executionScope?: ProviderExecutionScope;
 };
 
 /** Determinate only when the provider published a finite plan; otherwise indeterminate. Never time-based. */

@@ -1,6 +1,9 @@
 import type { Mode, ProviderId } from "../orch/types.ts";
 import type { MissionManager } from "./manager.server.ts";
 import type { GrantPolicy, SkillStep, SkillValidation } from "./types.ts";
+import { isAbsolute } from "node:path";
+import { statSync } from "node:fs";
+import { scopedPath } from "./paths.server.ts";
 
 const PROVIDERS: ProviderId[] = ["codex", "claude", "ollama", "opencode", "cline", "cursor"];
 const GRANTS: GrantPolicy[] = ["always_allow", "allow_for_mission", "ask_every_time", "read_only", "never_allow"];
@@ -23,7 +26,10 @@ export async function missionCommand(missions: MissionManager, action: string, d
   const direct = (cwd: unknown) => {
     const all = roots();
     const folder = cwd === undefined ? missions.tasks.defaultRoot : text(cwd, 2000);
-    return { missionId: null, stepId: null, envelope: null, origin: `workstation`, cwd: folder, roots: all };
+    if (!isAbsolute(folder) || [...folder].some((char) => char.charCodeAt(0) < 32) || process.platform === "win32" && (/^(\\\\|\/\/)/.test(folder) || /:[^\\/]/.test(folder.slice(2)))) throw new Error("Working directory must be a plain absolute project path.");
+    const canonical = scopedPath(missions.tasks.defaultRoot, folder, all);
+    if (!statSync(canonical).isDirectory()) throw new Error("Working directory must be an existing approved folder.");
+    return { missionId: null, stepId: null, envelope: null, origin: `workstation`, cwd: canonical, roots: all };
   };
   switch (action) {
     case "mission.create": {
