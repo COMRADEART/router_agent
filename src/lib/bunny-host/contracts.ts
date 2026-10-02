@@ -1,6 +1,8 @@
+import type { MissionSnapshot } from "../bunny-missions/types.ts";
 import type { Mode, OrchTask, Project, ProviderId, ProviderLive, HostSample, TaskConstraints, ProviderFeatures, TaskProgress, TokenUsage, UsageWindow, VerifySpec, ProcessInfo, TaskState } from "../orch/types.ts";
 
-export type HostEvent = { sequence: number; at: number; type: string; taskId: string | null; detail: string };
+/** missionId is null for direct-task and system events (and for every event written before schema v3). */
+export type HostEvent = { sequence: number; at: number; type: string; taskId: string | null; detail: string; missionId?: string | null };
 export type PerformanceProfile = {
   provider: ProviderId; taskType: string; count: number; completed: number; verified: number; durationMs: number;
   verifiedFailed?: number; stopped?: number; manual?: number; medianDurationMs?: number | null; inputTokens?: number; outputTokens?: number;
@@ -21,6 +23,8 @@ export type HostSnapshot = {
   remoteUrl?: string | null;
   devices?: {id:string;name:string;createdAt:number}[];
   thermal: {cpuWarn:number;gpuWarn:number;autoStop:boolean};
+  /** M-A-0 mission layer. Optional: older clients ignore it; when missions are disabled it reports enabled:false. */
+  missions?: MissionSnapshot;
 };
 export type SubmitTask = { prompt: string; mode: Mode; projectId?: string | null; override?: ProviderId | "auto"; constraints?: TaskConstraints; verify?: VerifySpec | null };
 export type AdapterResult = { ok: boolean; output: string; error?: string; stopped?: boolean; exitCode?: number | null };

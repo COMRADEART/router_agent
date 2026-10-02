@@ -29,6 +29,8 @@ import {
 } from "./motion";
 import { orbState, isPrivateEvent } from "./motion-model";
 import { useVoiceInput, VoicePanel } from "./voice";
+import { focusMission, justFinished } from "./mission-model";
+import { MissionCompletion, MissionPanel, MissionStrip } from "./mission";
 
 type View =
   | "idle"
@@ -40,7 +42,8 @@ type View =
   | "menu"
   | "thermal"
   | "constellation"
-  | "voice";
+  | "voice"
+  | "mission";
 export function FloatingIsland({ now }: { now: number }) {
   const store = useIsland();
   const providers = liveProviders(store);
@@ -61,13 +64,22 @@ export function FloatingIsland({ now }: { now: number }) {
       ? active[0]
       : (remembered ?? active[0]);
   const selected = store.tasks.find((t) => t.id === store.decisionTaskId);
+  // Missions: the live one (or the one the user opened) takes the Bar; its child tasks are shown inside it.
+  const mission = focusMission(store.missions);
+  const finished = justFinished(store.missions, now);
+  const shownMission =
+    store.missions?.missions.find((m) => m.id === store.missionFocus) ?? mission ?? finished;
+  const shownMissionId = shownMission?.id;
+  const shownMissionState = shownMission?.state;
+  const directActive = active.filter((t) => !t.mission);
+  const compactTask = mission ? directActive[0] : task;
   const reading = thermalReading();
   const taskId = task?.id;
   const taskState = task?.state;
   const selectedId = selected?.id;
   const selectedState = selected?.state;
   const heatKey = reading?.key;
-  const { sheet, setSheet, appearance } = store;
+  const { sheet, setSheet, appearance, missionFocus } = store;
   const routing = store.submitting;
   const expanded = view !== "idle" || routing;
   const visiblePrimary = store.appearance.primary.flatMap((id) =>
@@ -117,6 +129,25 @@ export function FloatingIsland({ now }: { now: number }) {
       setView("task");
     previous.current = { id: taskId, state: taskState };
   }, [taskId, taskState]);
+  useEffect(() => {
+    // A mission the user just created opens Mission Control in the Bar.
+    if (missionFocus) setView("mission");
+  }, [missionFocus]);
+  useEffect(() => {
+    if (
+      view !== "mission" ||
+      !shownMissionState ||
+      !["completed", "failed", "stopped"].includes(shownMissionState) ||
+      !appearance.collapse
+    )
+      return;
+    // Show the result briefly, then collapse back like a finished task.
+    const timer = setTimeout(() => {
+      setView("idle");
+      useIsland.setState({ missionFocus: null });
+    }, appearance.collapse * 1000);
+    return () => clearTimeout(timer);
+  }, [view, shownMissionId, shownMissionState, appearance.collapse]);
   useEffect(() => {
     if (heatKey && heatKey !== dismissedHeat && view !== "composer" && !routing) setView("thermal");
     if (!heatKey) setDismissedHeat(null);
@@ -313,6 +344,8 @@ export function FloatingIsland({ now }: { now: number }) {
               />
             ) : view === "composer" ? (
               <Composer />
+            ) : view === "mission" && shownMission ? (
+              <MissionPanel mission={shownMission} now={now} />
             ) : (view === "approval" || view === "task") &&
               task?.state === "waiting_for_approval" ? (
               <Approval task={task} />
@@ -353,6 +386,21 @@ export function FloatingIsland({ now }: { now: number }) {
                   {active.length} active tasks
                   <ChevronRight size={14} />
                 </button>
+                {store.missions?.enabled ? (
+                  <button
+                    onClick={() => {
+                      if (shownMission) setView("mission");
+                      else {
+                        store.setSheet("today");
+                        setView("idle");
+                      }
+                    }}
+                  >
+                    <Orbit size={17} />
+                    {mission ? "Mission control" : "Missions"}
+                    <ChevronRight size={14} />
+                  </button>
+                ) : null}
                 <button onClick={() => setView("constellation")}>
                   <Orbit size={17} />
                   Constellation
@@ -511,29 +559,53 @@ export function FloatingIsland({ now }: { now: number }) {
               </div>
             )}
           </div>
-        ) : active.length && task ? (
-          <button
-            className="island-live-compact"
-            onClick={() => {
-              if (task.state === "waiting_for_approval") {
-                store.openDecision(task.id);
-                setView("approval");
-              } else setView(active.length > 1 ? "tasks" : "task");
-            }}
-          >
-            <span>
-              <strong>{NAMES[task.provider]}</strong>
-              <small>
-                {(task.latestEvent && isPrivateEvent(task.latestEvent.type)
-                  ? "Working…"
-                  : task.latestEvent?.label) ??
-                  (task.state === "waiting_for_approval" ? "Needs approval" : "Working…")}
-              </small>
-            </span>
-            <time>{elapsed(task, now)}</time>
-            <ChevronDown size={14} />
-            {active.length > 1 ? <span className="count-pill">+{active.length - 1}</span> : null}
-          </button>
+        ) : mission || finished || (active.length && compactTask) ? (
+          <>
+            {mission ? (
+              <MissionStrip
+                mission={mission}
+                onOpen={() => {
+                  store.openMission(mission.id);
+                  setView("mission");
+                }}
+              />
+            ) : finished ? (
+              <MissionCompletion
+                mission={finished}
+                onOpen={() => {
+                  store.openMission(finished.id);
+                  setView("mission");
+                }}
+              />
+            ) : null}
+            {compactTask ? (
+              <button
+                className="island-live-compact"
+                onClick={() => {
+                  setFocused(compactTask.id);
+                  if (compactTask.state === "waiting_for_approval") {
+                    store.openDecision(compactTask.id);
+                    setView("approval");
+                  } else setView(active.length > 1 ? "tasks" : "task");
+                }}
+              >
+                <span>
+                  <strong>{NAMES[compactTask.provider]}</strong>
+                  <small>
+                    {(compactTask.latestEvent && isPrivateEvent(compactTask.latestEvent.type)
+                      ? "Working…"
+                      : compactTask.latestEvent?.label) ??
+                      (compactTask.state === "waiting_for_approval" ? "Needs approval" : "Working…")}
+                  </small>
+                </span>
+                <time>{elapsed(compactTask, now)}</time>
+                <ChevronDown size={14} />
+                {(mission ? directActive : active).length > 1 ? (
+                  <span className="count-pill">+{(mission ? directActive : active).length - 1}</span>
+                ) : null}
+              </button>
+            ) : null}
+          </>
         ) : null}
         <IslandNotifications
           now={now}

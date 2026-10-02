@@ -1,0 +1,406 @@
+/* Bunny-A M-A-0 Mission Control. Built from the shared tokens in bunny.css; motion obeys the global
+   Reduced/Off rules in motion.css (they disable animation and transition on every descendant). */
+
+.bunny-app .mission-strip {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  width: 100%;
+  text-align: left;
+  padding: var(--s3) var(--s5) var(--s3);
+  border-top: 1px solid var(--border);
+  animation: mission-in 260ms ease-out;
+}
+.bunny-app .mission-strip-title {
+  flex: 1;
+  min-width: 0;
+}
+.bunny-app .mission-strip-title strong {
+  display: block;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bunny-app .mission-strip-title small {
+  display: block;
+  color: var(--working);
+  font-size: var(--text-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bunny-app .mission-strip[data-state="waiting_for_approval"] .mission-strip-title small,
+.bunny-app .mission-strip[data-state="waiting_for_user"] .mission-strip-title small {
+  color: var(--warning);
+}
+.bunny-app .mission-finished[data-state="completed"] .mission-strip-title small {
+  color: var(--positive);
+}
+.bunny-app .mission-finished[data-state="failed"] .mission-strip-title small {
+  color: var(--negative);
+}
+.bunny-app .mission-agents {
+  display: flex;
+  gap: var(--s1);
+  flex-wrap: nowrap;
+  align-items: center;
+  min-width: 0;
+}
+.bunny-app .mission-agent-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  font-size: var(--text-xs);
+  color: var(--muted);
+  white-space: nowrap;
+  max-width: 120px;
+}
+.bunny-app .mission-agent-chip > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bunny-app .mission-agent-chip b {
+  font-weight: 600;
+}
+.bunny-app .mission-agent-chip[data-state="completed"] b {
+  color: var(--positive);
+}
+.bunny-app .mission-agent-chip[data-state="running"],
+.bunny-app .mission-agent-chip[data-state="verifying"] {
+  color: var(--fg);
+  border-color: var(--working-soft);
+  background: var(--working-soft);
+}
+.bunny-app .mission-agent-chip[data-state="running"] b,
+.bunny-app .mission-agent-chip[data-state="verifying"] b {
+  color: var(--working);
+  animation: mission-pulse 1.6s ease-in-out infinite;
+}
+.bunny-app .mission-agent-chip[data-state="waiting_for_approval"] b {
+  color: var(--warning);
+}
+.bunny-app .mission-agent-chip[data-state="failed"] b,
+.bunny-app .mission-agent-chip[data-state="blocked"] b {
+  color: var(--negative);
+}
+
+.bunny-app .mission-panel h2 {
+  margin-top: var(--s2);
+}
+.bunny-app .mission-badge {
+  font-size: var(--text-xs);
+  padding: 2px var(--s2);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.bunny-app .mission-badge[data-state="running"],
+.bunny-app .mission-badge[data-state="verifying"] {
+  color: var(--working);
+}
+.bunny-app .mission-badge[data-state="waiting_for_approval"],
+.bunny-app .mission-badge[data-state="waiting_for_user"] {
+  color: var(--warning);
+}
+.bunny-app .mission-badge[data-state="completed"] {
+  color: var(--positive);
+}
+.bunny-app .mission-badge[data-state="failed"] {
+  color: var(--negative);
+}
+.bunny-app .mission-progress {
+  display: grid;
+  gap: var(--s1);
+  margin: var(--s2) 0 var(--s3);
+  font-size: var(--text-xs);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.bunny-app .mission-meter {
+  display: block;
+  height: 4px;
+  border-radius: 4px;
+  background: var(--field);
+  overflow: hidden;
+}
+.bunny-app .mission-meter > span {
+  display: block;
+  height: 100%;
+  background: var(--working);
+  border-radius: 4px;
+  transition: width 400ms ease;
+}
+.bunny-app .mission-approval,
+.bunny-app .mission-request,
+.bunny-app .mission-agent-detail {
+  display: grid;
+  gap: var(--s2);
+}
+.bunny-app .mission-agent-detail > .quiet-button {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+}
+.bunny-app .mission-approval .eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+}
+.bunny-app .mission-plan,
+.bunny-app .mission-scope,
+.bunny-app .mission-checks {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+  font-size: var(--text-sm);
+}
+.bunny-app .mission-plan li {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding: var(--s1) var(--s2);
+  border-radius: var(--r-sm);
+  background: var(--field);
+}
+.bunny-app .mission-plan li span,
+.bunny-app .mission-scope li,
+.bunny-app .mission-checks li {
+  color: var(--muted);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+.bunny-app .mission-scope li::before {
+  content: "· ";
+}
+.bunny-app .mission-requests {
+  display: grid;
+  gap: var(--s3);
+  margin: var(--s3) 0;
+}
+.bunny-app .mission-request {
+  padding: var(--s3);
+  border: 1px solid var(--warning);
+  border-radius: var(--r-md);
+}
+.bunny-app .mission-request p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.bunny-app .mission-agent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+.bunny-app .mission-agent-list button {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  width: 100%;
+  text-align: left;
+  padding: var(--s2) var(--s3);
+  border-radius: var(--r-md);
+}
+.bunny-app .mission-agent-list button:hover {
+  background: var(--hover);
+}
+.bunny-app .mission-agent-list b {
+  width: 1.2em;
+  text-align: center;
+  color: var(--muted);
+}
+.bunny-app .mission-agent-list button[data-state="running"] b,
+.bunny-app .mission-agent-list button[data-state="verifying"] b {
+  color: var(--working);
+  animation: mission-pulse 1.6s ease-in-out infinite;
+}
+.bunny-app .mission-agent-list button[data-state="completed"] b {
+  color: var(--positive);
+}
+.bunny-app .mission-agent-list button[data-state="failed"] b,
+.bunny-app .mission-agent-list button[data-state="blocked"] b {
+  color: var(--negative);
+}
+.bunny-app .mission-agent-list button[data-state="waiting_for_approval"] b {
+  color: var(--warning);
+}
+.bunny-app .mission-agent-list span {
+  flex: 1;
+  min-width: 0;
+}
+.bunny-app .mission-agent-list strong {
+  display: block;
+  font-size: var(--text-sm);
+  font-weight: 550;
+}
+.bunny-app .mission-agent-list small {
+  display: block;
+  font-size: var(--text-xs);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bunny-app .mission-agent-list em {
+  font-style: normal;
+  font-size: var(--text-xs);
+  color: var(--subtle);
+}
+.bunny-app .mission-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px var(--s3);
+  margin: 0;
+  font-size: var(--text-sm);
+}
+.bunny-app .mission-facts dt {
+  color: var(--subtle);
+}
+.bunny-app .mission-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.bunny-app .mission-failure {
+  color: var(--negative);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+.bunny-app .mission-card {
+  padding: var(--s4) var(--s5);
+  border-radius: var(--r-lg);
+}
+.bunny-app .mission-inbox {
+  list-style: none;
+  margin: 0 0 var(--s3);
+  padding: var(--s2);
+  border-radius: var(--r-md);
+  display: grid;
+  gap: 2px;
+}
+.bunny-app .mission-inbox li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s3);
+  padding: var(--s2);
+}
+.bunny-app .mission-inbox li > span {
+  flex: 1;
+  min-width: 0;
+}
+.bunny-app .mission-inbox strong {
+  display: block;
+  font-size: var(--text-sm);
+}
+.bunny-app .mission-inbox small {
+  display: block;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+.bunny-app .mission-inbox li[data-kind="failure"] strong {
+  color: var(--negative);
+}
+.bunny-app .mission-inbox li[data-kind="requires_approval"] strong {
+  color: var(--warning);
+}
+.bunny-app .mission-history {
+  display: flex;
+  gap: var(--s2);
+  margin-top: var(--s3);
+  overflow-x: auto;
+  padding-bottom: var(--s1);
+}
+.bunny-app .mission-history button {
+  display: grid;
+  text-align: left;
+  min-width: 160px;
+  max-width: 220px;
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.bunny-app .mission-history button[data-active="true"] {
+  background: var(--hover);
+}
+.bunny-app .mission-history span {
+  font-size: var(--text-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bunny-app .mission-history small {
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+.bunny-app .compose-kind {
+  margin: var(--s2) 0;
+}
+.bunny-app .capability-list {
+  list-style: none;
+  margin: var(--s3) 0 0;
+  padding: 0;
+  display: grid;
+  gap: var(--s2);
+}
+.bunny-app .capability-list li {
+  display: grid;
+  grid-template-columns: minmax(90px, auto) auto 1fr;
+  gap: var(--s3);
+  align-items: baseline;
+  font-size: var(--text-sm);
+}
+.bunny-app .capability-list li span {
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+.bunny-app .capability-list li[data-availability="available"] span {
+  color: var(--positive);
+}
+.bunny-app .capability-list li[data-availability="unconfigured"] span,
+.bunny-app .capability-list li[data-availability="unavailable"] span {
+  color: var(--warning);
+}
+.bunny-app .capability-list small {
+  color: var(--subtle);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+@media (max-width: 560px) {
+  .bunny-app .mission-agents {
+    display: none;
+  }
+  .bunny-app .capability-list li {
+    grid-template-columns: 1fr auto;
+  }
+  .bunny-app .capability-list small {
+    grid-column: 1 / -1;
+  }
+}
+@keyframes mission-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes mission-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}

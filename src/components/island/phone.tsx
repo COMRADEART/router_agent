@@ -15,6 +15,7 @@ import { elapsed, percent, RUNNING } from "./ui-model";
 import { NAMES, ProviderMark, ProviderStatus, TaskActivity, TaskBadge } from "./ui";
 import { openTask } from "./task";
 import { thermalReadingFor } from "./ui-model";
+import { MissionsSection } from "./mission";
 
 export function Phone({ now }: { now: number }) {
   const store = useIsland();
@@ -61,6 +62,7 @@ export function Phone({ now }: { now: number }) {
         <Pairing compact />
       ) : (
         <>
+          <MissionsSection now={now} />
           <section>
             <div className="section-heading">
               <h2 className="eyebrow">Active</h2>
