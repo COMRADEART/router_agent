@@ -26,31 +26,41 @@ export class HostDatabase {
       CREATE TABLE IF NOT EXISTS devices(id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL, created_at INTEGER NOT NULL, revoked_at INTEGER);
       CREATE TABLE IF NOT EXISTS migrations(key TEXT PRIMARY KEY);
       CREATE INDEX IF NOT EXISTS events_task ON events(task_id, sequence);
-      PRAGMA user_version=2;`);
+      PRAGMA user_version=3;`);
     // Additive migration: older Host databases keep every row; new evidence columns start empty.
     const existing = new Set((this.db.prepare("PRAGMA table_info(outcomes)").all() as { name: string }[]).map((column) => column.name));
     for (const [name, type] of OUTCOME_COLUMNS) if (!existing.has(name)) this.db.exec(`ALTER TABLE outcomes ADD COLUMN ${name} ${type}`);
+    // v3 (M-A-0): events may belong to a mission. Existing events keep a null mission id.
+    const eventColumns = new Set((this.db.prepare("PRAGMA table_info(events)").all() as { name: string }[]).map((column) => column.name));
+    if (!eventColumns.has("mission_id")) this.db.exec("ALTER TABLE events ADD COLUMN mission_id TEXT");
+    this.db.exec("CREATE INDEX IF NOT EXISTS events_mission ON events(mission_id, sequence)");
   }
   tasks(): OrchTask[] { return (this.db.prepare("SELECT record FROM tasks").all() as { record: string }[]).map(row => JSON.parse(row.record) as OrchTask).sort((a,b) => b.createdAt-a.createdAt); }
   projects(): Project[] { return (this.db.prepare("SELECT record FROM projects").all() as { record: string }[]).map(row => JSON.parse(row.record) as Project); }
   get(id: string): OrchTask { const row = this.db.prepare("SELECT record FROM tasks WHERE id=?").get(id) as { record: string } | undefined; if (!row) throw new Error("Unknown task."); return JSON.parse(row.record) as OrchTask; }
   inserted = 0;
-  event(type: string, taskId: string | null, detail: string): HostEvent {
-    const at = Date.now(); const result = this.db.prepare("INSERT INTO events(at,type,task_id,detail) VALUES(?,?,?,?)").run(at,type,taskId,detail.slice(0,16000));
+  event(type: string, taskId: string | null, detail: string, missionId: string | null = null): HostEvent {
+    const at = Date.now(); const result = this.db.prepare("INSERT INTO events(at,type,task_id,detail,mission_id) VALUES(?,?,?,?,?)").run(at,type,taskId,detail.slice(0,16000),missionId);
     // Bound the journal: keep the newest 20,000 events, trimming every 500 inserts.
     if (++this.inserted % 500 === 0) this.db.prepare("DELETE FROM events WHERE sequence<=?").run(Number(result.lastInsertRowid) - 20000);
-    return { sequence: Number(result.lastInsertRowid), at, type, taskId, detail: detail.slice(0,16000) };
+    return { sequence: Number(result.lastInsertRowid), at, type, taskId, detail: detail.slice(0,16000), missionId };
   }
   write(task: OrchTask, type: string, detail: string): HostEvent {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db.prepare("INSERT INTO tasks(id,record) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record=excluded.record").run(task.id,JSON.stringify(task));
-      const event = this.event(type,task.id,detail); this.db.exec("COMMIT"); return event;
+      const event = this.event(type,task.id,detail,task.mission?.missionId ?? null); this.db.exec("COMMIT"); return event;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
-  events(after = 0): HostEvent[] { return (this.db.prepare("SELECT sequence,at,type,task_id AS taskId,detail FROM events WHERE sequence>? ORDER BY sequence LIMIT 500").all(after) as HostEvent[]); }
-  taskEvents(taskId: string, after = 0): HostEvent[] { return (this.db.prepare("SELECT sequence,at,type,task_id AS taskId,detail FROM events WHERE task_id=? AND sequence>? ORDER BY sequence LIMIT 500").all(taskId, after) as HostEvent[]); }
-  recentEvents(): HostEvent[] { return (this.db.prepare("SELECT sequence,at,type,task_id AS taskId,detail FROM events ORDER BY sequence DESC LIMIT 80").all() as HostEvent[]).reverse(); }
+  events(after = 0): HostEvent[] { return (this.db.prepare("SELECT sequence,at,type,task_id AS taskId,detail,mission_id AS missionId FROM events WHERE sequence>? ORDER BY sequence LIMIT 500").all(after) as HostEvent[]); }
+  taskEvents(taskId: string, after = 0): HostEvent[] { return (this.db.prepare("SELECT sequence,at,type,task_id AS taskId,detail,mission_id AS missionId FROM events WHERE task_id=? AND sequence>? ORDER BY sequence LIMIT 500").all(taskId, after) as HostEvent[]); }
+  recentEvents(): HostEvent[] { return (this.db.prepare("SELECT sequence,at,type,task_id AS taskId,detail,mission_id AS missionId FROM events ORDER BY sequence DESC LIMIT 80").all() as HostEvent[]).reverse(); }
+  /** A mission's own events plus those of its child tasks, in journal order. */
+  missionEvents(missionId: string, taskIds: string[], after = 0, limit = 500): HostEvent[] {
+    const placeholders = taskIds.map(() => "?").join(",");
+    const sql = `SELECT sequence,at,type,task_id AS taskId,detail,mission_id AS missionId FROM events WHERE sequence>? AND (mission_id=?${taskIds.length ? ` OR task_id IN (${placeholders})` : ""}) ORDER BY sequence LIMIT ?`;
+    return this.db.prepare(sql).all(after, missionId, ...taskIds, limit) as HostEvent[];
+  }
   cursor(): number { return Number((this.db.prepare("SELECT COALESCE(MAX(sequence),0) n FROM events").get() as { n: number }).n); }
   project(project: Project) { this.db.prepare("INSERT INTO projects(id,record) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET record=excluded.record").run(project.id, JSON.stringify(project)); }
   /** Records (or updates) the evidence for one finished task. Called again when verification or feedback arrives. */

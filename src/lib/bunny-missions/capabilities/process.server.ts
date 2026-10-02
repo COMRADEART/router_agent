@@ -1,0 +1,74 @@
+import { execFile, spawn } from "node:child_process";
+import { existsSync, statSync } from "node:fs";
+import { delimiter, dirname, extname, join } from "node:path";
+
+/** How a command is actually launched: always a real executable plus argv, never a shell string. */
+export type Resolved = { file: string; prefix: string[]; display: string };
+
+function onPath(name: string): string | null {
+  const exts = process.platform === "win32" ? [".exe", ".com"] : [""];
+  const hasExt = extname(name) !== "";
+  for (const folder of (process.env.PATH ?? process.env.Path ?? "").split(delimiter).filter(Boolean)) {
+    for (const ext of hasExt ? [""] : exts) {
+      const candidate = join(folder, name + ext);
+      try { if (existsSync(candidate) && statSync(candidate).isFile()) return candidate; } catch { /* unreadable PATH entry */ }
+    }
+  }
+  return null;
+}
+
+/**
+ * Resolves a command name to an executable. npm/npx run through this Node's bundled npm CLI so no
+ * `.cmd` shim (and therefore no cmd.exe shell) is involved. Scripts (.cmd/.bat/.ps1) are refused.
+ */
+export function resolveCommand(command: string): Resolved | null {
+  const name = command.trim();
+  if (!name || /[\s|&;<>^`$]/.test(name) && !/^[A-Za-z]:\\/.test(name)) return null;
+  if (/\.(cmd|bat|ps1|vbs|js|mjs)$/i.test(name)) return null;
+  const lower = name.toLowerCase().replace(/\.exe$/, "");
+  if (lower === "node") return { file: process.execPath, prefix: [], display: "node" };
+  if (lower === "npm" || lower === "npx") {
+    const cli = join(dirname(process.execPath), "node_modules", "npm", "bin", `${lower}-cli.js`);
+    if (existsSync(cli)) return { file: process.execPath, prefix: [cli], display: lower };
+    return null;
+  }
+  if (/[\\/]/.test(name)) return existsSync(name) && statSync(name).isFile() && (process.platform !== "win32" || /\.(exe|com)$/i.test(name)) ? { file: name, prefix: [], display: name } : null;
+  const found = onPath(name);
+  return found ? { file: found, prefix: [], display: lower } : null;
+}
+
+export type RunResult = { exitCode: number | null; stdout: string; stderr: string; durationMs: number; timedOut: boolean; aborted: boolean };
+
+/** Runs one owned process (argv, no shell) with bounded output; abort ends exactly that process tree. */
+export function runProcess(resolved: Resolved, args: string[], options: { cwd: string; signal: AbortSignal; timeoutMs: number; maxOutput?: number; env?: NodeJS.ProcessEnv }): Promise<RunResult> {
+  const max = options.maxOutput ?? 200_000; const started = Date.now();
+  return new Promise((resolveRun, reject) => {
+    if (options.signal.aborted) { reject(new Error("Aborted before start.")); return; }
+    const child = spawn(resolved.file, [...resolved.prefix, ...args], { cwd: options.cwd, shell: false, windowsHide: true, env: options.env ?? process.env, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = ""; let stderr = ""; let timedOut = false; let aborted = false;
+    const append = (current: string, chunk: Buffer) => current.length >= max ? current : (current + chunk.toString("utf8")).slice(0, max);
+    child.stdout.on("data", (chunk: Buffer) => { stdout = append(stdout, chunk); });
+    child.stderr.on("data", (chunk: Buffer) => { stderr = append(stderr, chunk); });
+    const kill = () => {
+      if (child.pid === undefined || child.exitCode !== null) return;
+      if (process.platform === "win32") execFile("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true }, () => {});
+      else child.kill("SIGKILL");
+    };
+    const timer = setTimeout(() => { timedOut = true; kill(); }, options.timeoutMs);
+    const onAbort = () => { aborted = true; kill(); };
+    options.signal.addEventListener("abort", onAbort, { once: true });
+    child.on("error", (error) => { clearTimeout(timer); options.signal.removeEventListener("abort", onAbort); reject(error); });
+    child.on("close", (code) => {
+      clearTimeout(timer); options.signal.removeEventListener("abort", onAbort);
+      resolveRun({ exitCode: code, stdout, stderr, durationMs: Date.now() - started, timedOut, aborted });
+    });
+  });
+}
+
+export async function runCommand(command: string, args: string[], options: { cwd: string; signal: AbortSignal; timeoutMs: number; maxOutput?: number }): Promise<RunResult> {
+  const resolved = resolveCommand(command);
+  if (!resolved) throw new Error(`Command "${command}" is not an executable Bunny-A can launch without a shell.`);
+  return runProcess(resolved, args, options);
+}
+
+export function tail(text: string, max = 1500) { return text.length > max ? `…${text.slice(-max)}` : text; }

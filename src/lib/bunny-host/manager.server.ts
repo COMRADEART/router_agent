@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { appendFileSync, mkdirSync, realpathSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { canTransition } from "../orch/machine.ts";
 import type { OrchTask, Project, ProviderId, ProviderLive, TaskState, HostSample, TaskProgress, TokenUsage, ProcessInfo } from "../orch/types.ts";
 import { HostDatabase } from "./persistence.server.ts";
@@ -45,6 +45,8 @@ export class TaskManager {
   treeTimers=new Map<string,ReturnType<typeof setTimeout>>();
   sessionDirectory: string | null;
   readProcesses: () => Promise<ProcessInfo[]>;
+  /** Host-owned folders (mission worktrees) a delegated child task may use as its working directory. */
+  workspaceRoots: string[]=[];
   constructor(db: HostDatabase,defaultRoot: string,adapters?: ProviderAdapter[],options: ManagerOptions={}) {
     this.db=db;this.defaultRoot=realpathSync(defaultRoot);
     this.policy=new PolicyEngine(db);
@@ -120,7 +122,11 @@ export class TaskManager {
     const existing=this.db.projects().find(p=>p.path===root);if(existing) return existing;
     const project={id:crypto.randomUUID(),name:name.trim(),path:root,preferred:"auto" as const};this.db.project(project);this.emit(this.db.event("project.registered",null,`Approved project root: ${project.name}`));return project;
   }
-  submit(input: SubmitTask): OrchTask {
+  /**
+   * `delegated` is only passed in-process by the MissionManager (never from HTTP input): it links the
+   * child task to its mission step and may place it in a Host-owned mission workspace.
+   */
+  submit(input: SubmitTask,delegated?: {missionId:string;stepId:string;cwd?:string|null}): OrchTask {
     const constraints=inferredConstraints(input.prompt,input.constraints);
     let project=input.projectId ? this.db.projects().find(p=>p.id===input.projectId) ?? null : null;
     if(input.projectId && !project) throw new Error("Project is not registered on this Host.");
@@ -132,9 +138,16 @@ export class TaskManager {
       if(project && project.path!==folder) throw new Error("The required working directory differs from the selected project.");
       project=owner;constraints.workingDirectory=folder;
     }
+    let cwd=project?.path ?? constraints.workingDirectory ?? this.defaultRoot;
+    if(delegated?.cwd) {
+      let folder:string;try {folder=realpathSync(resolve(delegated.cwd));} catch {throw new Error("The mission workspace does not exist.");}
+      const inside=(root:string)=>{let real:string;try {real=realpathSync(root);} catch {return false;}const rel=relative(real,folder);return rel==="" || (!!rel && !rel.startsWith("..") && !isAbsolute(rel));};
+      if(!statSync(folder).isDirectory() || !(folder===this.defaultRoot || this.db.projects().some(p=>p.path===folder) || this.workspaceRoots.some(inside))) throw new Error("The mission workspace is not an approved project folder or Host-owned workspace.");
+      cwd=folder;
+    }
     const live=this.live();const policy=this.policy.active();
     const decision=bunnyRoute({...input,providers:live,constraints,policyId:policy.id,learned:id=>this.policy.adjustment(live.find(p=>p.id===id)!,input.prompt,input.mode,policy)});
-    const task: OrchTask={id:crypto.randomUUID(),title:input.prompt.trim().split("\n")[0].slice(0,80),prompt:input.prompt,mode:input.mode,projectId:project?.id ?? null,cwd:project?.path ?? constraints.workingDirectory ?? this.defaultRoot,state:"queued",provider:decision.recommended_provider,model:decision.recommended_model,decision,manual:!!input.override && input.override!=="auto",createdAt:Date.now(),startedAt:null,finishedAt:null,output:"",error:null,logs:[],pauseSupported:false,sessionId:null,pid:null,exitCode:null,constraints,maxRuntimeMs:constraints.maxRuntimeMs ?? 120000,verify:input.verify ?? null,latestEvent:null,progress:null,usage:null,processTree:null,retries:0};
+    const task: OrchTask={id:crypto.randomUUID(),...(delegated ? {mission:{missionId:delegated.missionId,stepId:delegated.stepId}} : {}),title:input.prompt.trim().split("\n")[0].slice(0,80),prompt:input.prompt,mode:input.mode,projectId:project?.id ?? null,cwd,state:"queued",provider:decision.recommended_provider,model:decision.recommended_model,decision,manual:!!input.override && input.override!=="auto",createdAt:Date.now(),startedAt:null,finishedAt:null,output:"",error:null,logs:[],pauseSupported:false,sessionId:null,pid:null,exitCode:null,constraints,maxRuntimeMs:constraints.maxRuntimeMs ?? 120000,verify:input.verify ?? null,latestEvent:null,progress:null,usage:null,processTree:null,retries:0};
     this.emit(this.db.write(task,"task.created","Task created on Bunny-A Host."));
     const routing=this.update(task,{state:"routing"},"routing.started","Routing with readiness and hard constraints.");
     return this.update(routing,{state:"waiting_for_approval",activity:"Waiting for approval"},"approval.required",decision.reason);
@@ -154,13 +167,28 @@ export class TaskManager {
   activity(task: OrchTask,type: string,detail: string,actor:"provider"|"bunny"="provider") {
     return {type,detail:clip(detail),at:Date.now(),label:activityLabel(type),actor};
   }
+  /** Direct user approval. Unchanged contract: launches exactly one task that is waiting for approval. */
   approve(id: string): OrchTask {
+    return this.launch(id,{kind:"user",at:Date.now()},"approval.accepted","User approved this task and execution root.");
+  }
+  /**
+   * Mission-delegated approval: the user approved the mission's authorization envelope, not this child.
+   * `check` re-validates the child against that envelope at launch time; anything outside it is refused
+   * so the mission stops and asks. Recorded as `approval.delegated`, never as a user click.
+   */
+  approveDelegated(id: string,delegation:{missionId:string;stepId:string;authorizationId:string;check:(task:OrchTask)=>string|null}): OrchTask {
+    const task=this.db.get(id);
+    if(!task.mission || task.mission.missionId!==delegation.missionId || task.mission.stepId!==delegation.stepId) throw new Error("Delegated approval only applies to this mission's own child task.");
+    const outside=delegation.check(task);if(outside) throw new Error(`Outside the mission authorization: ${outside}`);
+    return this.launch(id,{kind:"mission",at:Date.now(),authorizationId:delegation.authorizationId,missionId:delegation.missionId,stepId:delegation.stepId},"approval.delegated",`Mission-delegated approval under authorization ${delegation.authorizationId} (mission ${delegation.missionId}, step ${delegation.stepId}). The user approved the mission scope, not this individual child task.`);
+  }
+  private launch(id: string,approval: NonNullable<OrchTask["approval"]>,approvalEvent: string,approvalDetail: string): OrchTask {
     const task=this.db.get(id);if(task.state!=="waiting_for_approval") throw new Error("Task is not awaiting approval; duplicate launches are refused.");
     const provider=this.live().find(p=>p.id===task.provider);if(!provider) throw new Error("Executor is no longer eligible. Route again.");
     const blocked=eligibility(provider,task.constraints ?? {});if(blocked) throw new Error(`Executor is no longer eligible: ${blocked} Route again.`);
     const adapter=this.adapters.find(a=>a.id===task.provider);if(!adapter) throw new Error("Adapter unsupported.");
     if(!task.cwd || realpathSync(task.cwd)!==task.cwd || !statSync(task.cwd).isDirectory()) throw new Error("Execution root changed or is unavailable.");
-    const accepted=this.update(task,{state:"launching",startedAt:Date.now(),activity:"Starting"},"approval.accepted","User approved this task and execution root.");
+    const accepted=this.update(task,{state:"launching",startedAt:Date.now(),activity:"Starting",...(approval.kind==="mission" ? {approval} : {})},approvalEvent,approvalDetail);
     const launching=this.update(accepted,{latestEvent:this.activity(accepted,"agent.starting",`${provider.name} starting in ${task.cwd}.`),progress:{kind:"indeterminate"}},"agent.starting",`${provider.name} starting in ${task.cwd}.`);
     // Streamed chunks are coalesced: one record write, event and log-free update per flush instead of per token.
     let pending="";let flushTimer:ReturnType<typeof setTimeout>|null=null;let pendingProgress:TaskProgress|null=null;let reportedUsage:TokenUsage|null=null;

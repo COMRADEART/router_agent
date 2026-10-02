@@ -197,6 +197,10 @@ export type OrchTask = {
   retries?: number;
   /** Independent check Bunny-A runs itself after the provider exits successfully. */
   verify?: VerifySpec | null;
+  /** Set only on child tasks a mission created; direct tasks never carry it. */
+  mission?: { missionId: string; stepId: string } | null;
+  /** Who launched it: a direct user approval or a mission-delegated approval under an authorization envelope. */
+  approval?: { kind: "user" | "mission"; at: number; authorizationId?: string; missionId?: string; stepId?: string } | null;
 };
 
 /** Determinate only when the provider published a finite plan; otherwise indeterminate. Never time-based. */

@@ -7,7 +7,9 @@ import { TaskManager } from "./manager.server.ts";
 import { sampleHost } from "../orch/telemetry.server.ts";
 import { validateVerifySpec, verifyTask } from "./verification.server.ts";
 import type { Mode, OrchTask, Project, ProviderId, TaskConstraints } from "../orch/types.ts";
-import type { AgentSession } from "./contracts.ts";
+import type { AgentSession, HostSnapshot } from "./contracts.ts";
+import { MissionManager, type MissionManagerOptions } from "../bunny-missions/manager.server.ts";
+import { MISSION_ACTIONS, missionCommand } from "../bunny-missions/commands.server.ts";
 
 const PROVIDERS: ProviderId[]=["codex","claude","ollama","opencode","cline","cursor"];
 function record(value: unknown): Record<string,unknown> {if(!value || typeof value!=="object" || Array.isArray(value)) throw new Error("Expected an object.");return value as Record<string,unknown>;}
@@ -51,7 +53,7 @@ async function body(request: IncomingMessage) {let data="";for await(const chunk
 // charset is explicit: Windows PowerShell 5.1 (the native Island) otherwise decodes JSON as Latin-1.
 function json(response: ServerResponse,value: unknown,status=200) {response.writeHead(status,{"content-type":"application/json; charset=utf-8","cache-control":"no-store","x-content-type-options":"nosniff"});response.end(JSON.stringify(value));}
 
-export async function startHost(options: { dataDirectory?: string; root?: string; port?: number }={}) {
+export async function startHost(options: { dataDirectory?: string; root?: string; port?: number; missions?: Omit<MissionManagerOptions,"dataDirectory"> }={}) {
   const dataDirectory=resolve(options.dataDirectory ?? process.env.BUNNY_HOST_DATA_DIRECTORY ?? ".bunny-a");
   mkdirSync(dataDirectory,{recursive:true});
   const credentialPath=join(dataDirectory,"credentials.json");
@@ -60,6 +62,9 @@ export async function startHost(options: { dataDirectory?: string; root?: string
   const port=options.port ?? Number(process.env.BUNNY_HOST_PORT ?? 43119);
   const db=new HostDatabase(join(dataDirectory,"host.sqlite"));
   const manager=new TaskManager(db,options.root ?? process.cwd(),undefined,{sessionDirectory:join(dataDirectory,"sessions")});
+  // M-A-0 mission layer: additive tables are created, but nothing runs unless missions are enabled.
+  const missions=new MissionManager(manager,{dataDirectory,...options.missions});
+  const snapshot=(after:number):HostSnapshot=>({...manager.snapshot(after),missions:missions.snapshot()});
   manager.remoteConfigured=!!process.env.BUNNY_REMOTE_ORIGIN || existsSync(join(dataDirectory,"remote.json"));
   if(existsSync(join(dataDirectory,"remote.json"))) manager.remoteUrl=JSON.parse(readFileSync(join(dataDirectory,"remote.json"),"utf8")).url;
   let pairing: {codeHash: string;expiresAt:number} | null=null;
@@ -92,7 +97,7 @@ export async function startHost(options: { dataDirectory?: string; root?: string
     if(!local && !device) return json(res,{error:"Authentication required."},401);
     try {
       const after=Number(path.searchParams.get("after") ?? 0);if(!Number.isSafeInteger(after) || after<0) throw new Error("Invalid event cursor.");
-      if(req.method === "GET" && path.pathname === "/state") return json(res,manager.snapshot(after));
+      if(req.method === "GET" && path.pathname === "/state") return json(res,snapshot(after));
       if(req.method === "GET" && path.pathname === "/events") {
         res.writeHead(200,{"content-type":"text/event-stream; charset=utf-8","cache-control":"no-cache","connection":"keep-alive"});
         let cursor=after;const taskId=path.searchParams.get("task");
@@ -103,8 +108,9 @@ export async function startHost(options: { dataDirectory?: string; root?: string
         req.on("close",()=>{clearInterval(heartbeat);manager.bus.off("event",drain);});return;
       }
       if(req.method!=="POST" || path.pathname!=="/command") return json(res,{error:"Not found"},404);
-      const input=await body(req);const data=record(input.data ?? {});let task:OrchTask | undefined;let pairCode:string | undefined;let session:AgentSession | undefined;
-      switch(input.action) {
+      const input=await body(req);const data=record(input.data ?? {});let task:OrchTask | undefined;let pairCode:string | undefined;let session:AgentSession | undefined;let extra:{mission?:unknown;data?:unknown}={};
+      if(typeof input.action==="string" && MISSION_ACTIONS.has(input.action)) extra=await missionCommand(missions,input.action,data,{local,actor:local ? "workstation" : `device:${device!.id}`});
+      else switch(input.action) {
         case "submit": task=manager.submit(validateSubmit(data));break;
         case "approve": task=manager.approve(text(data.id,200));break;
         case "stop": task=await manager.stop(text(data.id,200));break;
@@ -172,7 +178,7 @@ export async function startHost(options: { dataDirectory?: string; root?: string
         default: throw new Error("Unknown Host action.");
       }
       manager.emit(db.event("audit.command",task?.id ?? null,`${local ? "workstation" : `device ${device!.id}`}: ${String(input.action)}`));
-      json(res,{snapshot:manager.snapshot(after),task,pairCode,session});
+      json(res,{snapshot:snapshot(after),task,pairCode,session,...extra});
     } catch(error) {json(res,{error:error instanceof Error ? error.message : String(error)},400);}
   });
   await new Promise<void>((resolveListen,reject)=>{server.once("error",reject);server.listen(port,"127.0.0.1",resolveListen);});
@@ -182,8 +188,8 @@ export async function startHost(options: { dataDirectory?: string; root?: string
   const poll=async()=>{if(closing) return;try {manager.sample(await sampleHost());} catch { /* Sensor failure leaves last known samples and timestamps. */ }};
   // Every 30 s: cheap health checks; full CLI probes only when their interval is due (the registry decides).
   await poll();const telemetry=setInterval(()=>void poll(),3000);const discovery=setInterval(()=>void manager.refreshProviders().catch(()=>{}),30000);
-  const close=async()=>{closing=true;clearInterval(telemetry);clearInterval(discovery);for(const id of manager.sessions.keys()) await manager.stop(id,"Host shutdown stopped this owned task.").catch(()=>{});await new Promise<void>(r=>{server.closeAllConnections();server.close(()=>r());});db.close();};
+  const close=async()=>{closing=true;clearInterval(telemetry);clearInterval(discovery);for(const id of manager.sessions.keys()) await manager.stop(id,"Host shutdown stopped this owned task.").catch(()=>{});await missions.close().catch(()=>{});await new Promise<void>(r=>{server.closeAllConnections();server.close(()=>r());});db.close();};
   process.once("SIGTERM",()=>void close().then(()=>process.exit(0)));process.once("SIGINT",()=>void close().then(()=>process.exit(0)));
   console.log(`Bunny-A Host ready on loopback (${manager.instanceId}).`);
-  return {server,manager,close,token,port};
+  return {server,manager,missions,close,token,port};
 }
