@@ -323,10 +323,14 @@ export class ClaudeAdapter extends CliBase implements ProviderAdapter {
   }
 }
 
-/** CLI contracts verified with installed Codex 0.159.0-alpha.12.1 and Claude Code 2.1.288 help. */
-export function codexLaunchArgs(task: OrchTask): string[] {
-  return ["exec", "--json", "--sandbox", task.executionScope?.access === "read" ? "read-only" : "workspace-write", "--skip-git-repo-check", "--cd", task.cwd!, "--model", task.model, "-"];
+/** Read isolation flags verified with Bunny-resolved codex-cli 0.153.4 exec --help. */
+export function codexLaunchArgs(task: OrchTask, platform = process.platform): string[] {
+  const read = task.executionScope?.access === "read";
+  // Ignore extensions and execpolicy from user config; restore only trusted native Windows sandbox policy.
+  const isolation = read ? ["--ignore-user-config", "--ignore-rules", ...(platform === "win32" ? ["-c", 'windows.sandbox="elevated"'] : [])] : [];
+  return ["exec", "--json", "--sandbox", read ? "read-only" : "workspace-write", ...isolation, "--skip-git-repo-check", "--cd", task.cwd!, "--model", task.model, "-"];
 }
+/** Claude read/write contracts verified with installed Claude Code 2.1.288 help. */
 export function claudeLaunchArgs(task: OrchTask, sessionId: string, platform = process.platform): string[] {
   const read = task.executionScope?.access === "read";
   const tools = read ? "Read" : platform === "win32" ? "Read,Write,Edit,Bash,PowerShell" : "Read,Write,Edit,Bash";

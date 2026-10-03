@@ -6,6 +6,26 @@ October 2, 2026 · `COMRADEART/router_agent` · branch `ma0-mission-architecture
 
 Original independent verdict: **BUNNY_MA0_REVIEW_PASS_WITH_REMEDIATION** — 0 BLOCKER, 1 HIGH, 3 MEDIUM, 3 LOW. This closes the supplied Review 0 scope; it is not M-A-1 or a redesign. M1 is **MITIGATED**, rather than claiming that provider-internal operations have become Capability Bus calls.
 
+## M-A-0R2 / R1 follow-up
+
+Claude Review 0R independently returned **BUNNY_MA0_FREEZE_APPROVED_WITH_NOTES** for `284249353a5b6ae7105d40f1f3a17f135b5d878b`: no BLOCKER/HIGH, with **R1 (MEDIUM)** required before accepting a Codex read step in M-A-1. The earlier H1 work enforced child ≤ step ≤ envelope, but Codex still inherited user-configured MCP/plugin tools. **R1 launch-contract remediation is complete**; independent Claude Review 0R2 is still required before treating its commit as a final freeze candidate.
+
+Read-scoped Codex launches now use `--sandbox read-only --ignore-user-config --ignore-rules`, plus the sole explicit Windows override `-c windows.sandbox="elevated"`. Bunny's actual resolved executable is `C:\Users\allam\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe`, **codex-cli 0.153.4**. Its `exec --help` confirms both isolation flags and dotted TOML `-c` syntax; a help-only invocation accepts the actual generated argv. The running Host reports the same path/version. This corrects the earlier documentation's evidence from a different alpha executable. User config/auth and both untracked Claude reports were not edited.
+
+Only the Codex argument helper changes production behavior. Explicit read scope controls isolation, independent of role; direct and write argv are identical to pre-R1. Claude launch code, provider discovery/routing, Mission architecture, persistence and installed Host remain unchanged. New tests exercise real MissionManager → TaskManager → CodexAdapter → spawnSession with disposable CLI stand-ins, covering Research/CustomAgent, Claude → Codex retarget, automatic/explicit retry, read replan and missing-authority refusal. Existing tests now assert the exact direct/write argv and minimal config restoration.
+
+| R1 gate | Result | Ignored local evidence under `test-results/ma0r2/` |
+|---|---|---|
+| Focused adapter/scope tests | **14/14** | `focused-test.log` |
+| Full tests | **205 script + 174 app/Host/Mission + 20 UI = 399/399**, 0 failures/skips/cancellations; all 391 prior tests retained, 8 added | `full-test.log`, `ui-test.log` |
+| Typecheck / build | **exit 0 / exit 0** | `typecheck.log`, `build.log` |
+| Lint | **0 errors / same 10 warnings**; diagnostic output byte-identical to M-A-0R | `lint.log` |
+| Migration / legacy compatibility | **PASS**, source DB/WAL unchanged; two snapshot opens and actual `ea0e803` reads | `migration-evidence.json`, `migration.log` |
+| Missions disabled / direct behavior | **PASS**, retained full-suite tests plus exact legacy adapter argv | full tests |
+| Dev / built render | Desktop/mobile content, clean console, no overflow; all four screenshots inspected. Built output does not diverge from the prior reviewed built baseline. The existing built-preview Host connection limitation still differs from connected dev. | `dev-smoke.log`, `built-smoke.log`, `prior-built-comparison.json`; `screenshots/ma0r2-*.png` |
+
+The complete current evidence, exact CLI syntax, changed-file list and residual acceptance boundaries are in [MA0_R1_CLOSURE_REPORT.md](MA0_R1_CLOSURE_REPORT.md). No live provider session, M-A-1 acceptance, configured MCP invocation, user-profile browser/computer action, push, merge or history rewrite was performed. The following sections retain the historical Review 0 remediation evidence and counts.
+
 ## Preserved baseline
 
 Before edits, `git status --short` showed only the user-supplied untracked `MA0_CLAUDE_REVIEW_0.md`; it was read fully and remains unchanged/untracked. Branch was `ma0-mission-architecture`, HEAD `33723ee0d3992203bc4951cee76d32ff6df3935a`. Diff `ea0e803...HEAD`: 48 files, +6,098/−51. No unrelated production edits were present.
@@ -16,7 +36,7 @@ Remediation code commits:
 
 * **`02d6a7efe2423d3cca6ab6c466f509e22da2aedd`** — `MA0R: enforce mission authority and safe Git cancellation`.
 * **`b97502638a1304a004376a06170d33f520196327`** — `MA0R: isolate browser connections from private networks`.
-* The documentation/handoff commit containing this report follows these code commits; `git log -3` identifies it without a self-referential hash.
+* **`284249353a5b6ae7105d40f1f3a17f135b5d878b`** — `MA0R: close review findings and document regression evidence` (original documentation/handoff, independently reviewed in Review 0R).
 
 ## Finding closure
 
@@ -82,7 +102,7 @@ The first restricted browser smoke could not load the platform branding script; 
 ## Residual limitations / M-A-1 handoff
 
 * **M1:** provider-internal write/shell/external actions remain governed by CLI permissions, not Capability Bus mediation. Approval delegates this explicitly. Claude tool restrictions are a CLI trust boundary, not an OS write jail for writable sessions. No claim of per-operation external-effect gating inside provider sessions is made.
-* CLI flag/tool behavior is checked against installed Codex 0.159.0-alpha.12.1 / Claude Code 2.1.288 help and actual adapter argv stand-ins. **No live Codex/Claude/Ollama mission acceptance was run and no mission quota was spent.** M-A-1 must run the authorized live read/write acceptance against installed providers.
+* Review 0's Codex help evidence came from a different 0.159.0-alpha.12.1 executable. R1 corrects this with Bunny-resolved **codex-cli 0.153.4**, supported isolation flags and actual adapter argv stand-ins; Claude Code 2.1.288 launch code is unchanged. **No live Codex/Claude/Ollama mission acceptance was run and no mission quota was spent.** M-A-1 must run the authorized live read/write acceptance against installed providers, including Codex tool-availability and native Windows write-refusal probes.
 * Terminal trust pins canonical file + argv prefix; same-path binary/library replacement by a workstation actor is outside this fix.
 * Git cleanup is truthful, not unconditional: if ownership cannot be proven, inspection/abort fails, an early interruption leaves an unowned index lock, or commit wins cancellation, preserve work and report it. Hard Host/process crashes are not automatically repaired. No destructive reset or cleanup of a user-created merge is added.
 * Browser defense governs its destination connections, not an exploited browser/native workstation process or remote public server's own fetches. Public fixture HTTP and CONNECT pinning are tested; broad live internet browsing and actual phone/public tunnel acceptance remain M-A-1 work.
