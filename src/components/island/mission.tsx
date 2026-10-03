@@ -13,6 +13,7 @@ import {
   progressFraction,
   progressLabel,
   scopeSummary,
+  permissionLabel,
 } from "./mission-model";
 import type { ProviderId } from "@/lib/orch/types";
 
@@ -100,7 +101,7 @@ function ApprovalCard({ mission }: { mission: MissionView }) {
         {mission.steps.map((step) => (
           <li key={step.id}>
             <strong>{step.role}</strong>
-            <span>{step.executor.kind === "model" ? "AI agent" : step.executor.kind === "skill" ? `Skill · ${step.executor.skillId}` : step.executor.action}</span>
+            <span>{step.executor.kind === "model" ? `AI agent · ${step.scope.access === "read" ? "read only" : "write & shell capable"}` : step.executor.kind === "skill" ? `Skill · ${step.executor.skillId}` : step.executor.action}</span>
           </li>
         ))}
       </ol>
@@ -135,9 +136,10 @@ function Requests({ mission }: { mission: MissionView }) {
             <code>{request.action}</code> ({request.risk.toLowerCase().replaceAll("_", " ")})
           </p>
           <p className="caption">{request.reason}</p>
+          {mission.steps.find((step) => step.id === request.stepId)?.executor.kind === "skill" ? <p className="caption">Allows matching actions throughout this skill run inside the approved folders. Other actions still require their own approval.</p> : null}
           <div className="actions">
             <button className="btn primary" onClick={() => void store.respondMission(request.id, "allow_once")}>
-              Allow once
+              {permissionLabel(mission, request.stepId)}
             </button>
             <button className="btn quiet" onClick={() => void store.respondMission(request.id, "deny")}>
               Deny

@@ -277,7 +277,7 @@ export class CodexAdapter extends CliBase implements ProviderAdapter {
   launch(task: OrchTask, hooks: AdapterHooks): RunningSession {
     const launch = this.launchTarget;
     if (!launch || !this.detected?.authenticated) throw new Error("Codex is not ready for execution.");
-    const args = ["exec", "--json", "--sandbox", "workspace-write", "--skip-git-repo-check", "--cd", task.cwd!, "--model", task.model, "-"];
+    const args = codexLaunchArgs(task);
     return spawnSession("codex", launch, args, task, hooks, task.sessionId ?? crypto.randomUUID());
   }
 }
@@ -318,10 +318,25 @@ export class ClaudeAdapter extends CliBase implements ProviderAdapter {
     if (!launch || !this.detected?.authenticated) throw new Error("Claude Code is not ready for execution.");
     const sessionId = task.sessionId ?? crypto.randomUUID();
     // PowerShell is Claude Code's native shell tool on Windows; it carries the same authority as Bash, which is already allowed.
-    const tools = process.platform === "win32" ? "Read,Write,Edit,Bash,PowerShell" : "Read,Write,Edit,Bash";
-    const args = ["--print", "--verbose", "--output-format", "stream-json", "--session-id", sessionId, "--safe-mode", "--strict-mcp-config", "--permission-mode", "acceptEdits", "--permission-prompts", "none", "--allowedTools", tools, "--"];
+    const args = claudeLaunchArgs(task, sessionId);
     return spawnSession("claude", launch, args, task, hooks, sessionId);
   }
+}
+
+/** Read isolation flags verified with Bunny-resolved codex-cli 0.153.4 exec --help. */
+export function codexLaunchArgs(task: OrchTask, platform = process.platform): string[] {
+  const read = task.executionScope?.access === "read";
+  // Ignore extensions and execpolicy from user config; restore only trusted native Windows sandbox policy.
+  const isolation = read ? ["--ignore-user-config", "--ignore-rules", ...(platform === "win32" ? ["-c", 'windows.sandbox="elevated"'] : [])] : [];
+  return ["exec", "--json", "--sandbox", read ? "read-only" : "workspace-write", ...isolation, "--skip-git-repo-check", "--cd", task.cwd!, "--model", task.model, "-"];
+}
+/** Claude read/write contracts verified with installed Claude Code 2.1.288 help. */
+export function claudeLaunchArgs(task: OrchTask, sessionId: string, platform = process.platform): string[] {
+  const read = task.executionScope?.access === "read";
+  const tools = read ? "Read" : platform === "win32" ? "Read,Write,Edit,Bash,PowerShell" : "Read,Write,Edit,Bash";
+  return ["--print", "--verbose", "--output-format", "stream-json", "--session-id", sessionId, "--safe-mode", "--strict-mcp-config",
+    ...(read ? ["--restricted", "--tools", "Read", "--disallowedTools", "Write,Edit,Bash,PowerShell", "--setting-sources", ""] : []),
+    "--permission-mode", read ? "dontAsk" : "acceptEdits", "--permission-prompts", "none", "--allowedTools", tools, "--"];
 }
 
 /** Real discovery for providers Bunny-A cannot execute yet; they are listed honestly and never routed. */

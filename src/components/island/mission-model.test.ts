@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { agentDetail, agentRows, focusMission, justFinished, progressFraction, progressLabel, scopeSummary } from "./mission-model.ts";
+import { agentDetail, agentRows, focusMission, justFinished, permissionLabel, progressFraction, progressLabel, scopeSummary } from "./mission-model.ts";
 import type { MissionSnapshot, MissionStep, MissionView } from "../../lib/bunny-missions/types.ts";
 import type { OrchTask } from "../../lib/orch/types.ts";
 
@@ -69,4 +69,21 @@ test("approval card summarizes the requested scope truthfully", () => {
   assert.ok(lines.includes("Commands: npm"));
   assert.ok(lines.some((line) => /always asks for external side effect and destructive/.test(line)));
   assert.ok(!lines.some((line) => /browser/i.test(line)), "nothing is claimed that was not requested");
+});
+
+test("MA0R: approval explains read/write agent authority, shell access, bounded sessions and separate external approval", () => {
+  const steps = [step("r", "Custom inspector", "pending"), step("w", "Research", "pending", { scope: { root: "C:/p", access: "write", isolation: "shared" } })];
+  const m = mission("a", "waiting_for_approval", steps, { requestedScope: {
+    projectRoots: ["C:/p"], riskClasses: ["READ", "WRITE", "EXECUTE"], capabilities: [], providers: { execution: true, allow: ["codex", "claude"], localOnly: false, sessions: { steps: steps.map((step) => ({ stepId: step.id, scope: { access: step.scope.access } })), maxSessions: 10, writeIncludesShell: true } },
+    filesystem: { read: ["C:/p"], write: ["C:/p"] }, browser: { enabled: false, domains: "public" }, terminal: { enabled: false, commands: [] }, git: { actions: [] }, network: { allowed: false }, computer: { enabled: false },
+    budget: { maxExternalModelCalls: 6, maxRuntimeMs: 3_600_000, maxRetries: 4, maxTokens: null }, alwaysAsk: ["EXTERNAL_SIDE_EFFECT", "DESTRUCTIVE"] } });
+  const text = scopeSummary(m).join("\n");
+  assert.match(text, /Custom inspector \(read only\)/); assert.match(text, /Research \(write & shell capable\)/);
+  assert.match(text, /up to 10, including retries/); assert.match(text, /provider permissions/);
+  assert.match(text, /External effects inside an agent session are governed by the provider/);
+});
+test("MA0R: approval wording distinguishes one capability action from matching actions in this skill run", () => {
+  const m = mission("a", "waiting_for_user", [step("s", "Skill", "waiting_for_approval", { executor: { kind: "skill", skillId: "two", params: {} } }), step("c", "Capability", "waiting_for_approval", { executor: { kind: "capability", action: "filesystem.write", params: {} } })]);
+  assert.equal(permissionLabel(m, "s"), "Allow this skill run");
+  assert.equal(permissionLabel(m, "c"), "Allow once");
 });

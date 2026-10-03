@@ -1,6 +1,7 @@
 import { basename, isAbsolute, resolve } from "node:path";
-import type { Mode, ProviderId } from "../orch/types.ts";
+import type { Mode, ProviderId, ProviderExecutionScope } from "../orch/types.ts";
 import { withinAny } from "./paths.server.ts";
+import { resolveCommand, type Resolved } from "./capabilities/process.server.ts";
 import type { ActionManifest, AuthorizationEnvelope, Budget, GitAction, GrantPolicy, MissionStep, PermissionDecision, RiskClass, ScopeRequest } from "./types.ts";
 
 export const ALWAYS_ASK: RiskClass[] = ["EXTERNAL_SIDE_EFFECT", "DESTRUCTIVE"];
@@ -15,7 +16,7 @@ export function matches(patterns: string[], action: string) {
   return patterns.some((pattern) => pattern === "*" || pattern === action || (pattern.endsWith(".*") && action.startsWith(pattern.slice(0, -1))));
 }
 /** Command identity for allowlists: "C:\\x\\Node.EXE" → "node". */
-export function commandName(command: string) { return basename(command).toLowerCase().replace(/\.(exe|cmd|bat)$/, ""); }
+export function commandName(command: string) { return basename(command.replaceAll("\\", "/")).toLowerCase().replace(/\.(exe|cmd|bat)$/, ""); }
 export function domainOf(url: string): string | null { try { return new URL(url).hostname.toLowerCase(); } catch { return null; } }
 function domainAllowed(domains: string[] | "public", host: string) {
   if (domains === "public") return true;
@@ -26,9 +27,15 @@ function domainAllowed(domains: string[] | "public", host: string) {
  * The scope a mission asks for, derived from its planned steps. Nothing is granted until the user
  * approves the mission; approval turns this request into a persisted envelope.
  */
-export function scopeFor(steps: Pick<MissionStep, "executor" | "requiredCapabilities" | "verification" | "scope" | "providerConstraints">[], root: string, mode: Mode, options: { localOnly?: boolean; providers?: ProviderId[] | null; budget?: Budget; skillSteps?: (skillId: string) => { action: string; params: Record<string, unknown> }[] } = {}): ScopeRequest {
+export function scopeFor(steps: (Pick<MissionStep, "executor" | "requiredCapabilities" | "verification" | "scope" | "providerConstraints"> & { id?: string })[], root: string, mode: Mode, options: { localOnly?: boolean; providers?: ProviderId[] | null; budget?: Budget; skillSteps?: (skillId: string) => { action: string; params: Record<string, unknown> }[] } = {}): ScopeRequest {
   const actions = new Set<string>(["notifications.send", "filesystem.read", "filesystem.list", "filesystem.exists"]);
-  const commands = new Set<string>(); const git = new Set<GitAction>(); const risks = new Set<RiskClass>(["READ"]);
+  const commands = new Set<string>(); const executables = new Map<string, { command: string; file: string; prefix: string[] }>();
+  const approveCommand = (command: string) => {
+    commands.add(commandName(command));
+    const identity = resolveCommand(command, root);
+    if (identity) executables.set(JSON.stringify([identity.file, identity.prefix]), { command, file: identity.file, prefix: identity.prefix });
+  };
+  const git = new Set<GitAction>(); const risks = new Set<RiskClass>(["READ"]);
   let browser = false; let computer = false; let network = false; let execution = false; let write = false;
   for (const step of steps) {
     for (const capability of step.requiredCapabilities) actions.add(capability);
@@ -37,9 +44,9 @@ export function scopeFor(steps: Pick<MissionStep, "executor" | "requiredCapabili
     const concrete = step.executor.kind === "capability" ? [{ action: step.executor.action, params: step.executor.params as Record<string, unknown> }] : step.executor.kind === "skill" ? options.skillSteps?.(step.executor.skillId) ?? [] : [];
     for (const item of concrete) {
       actions.add(item.action);
-      if (item.action === "terminal.exec" && typeof item.params.command === "string") commands.add(commandName(item.params.command));
+      if (item.action === "terminal.exec" && typeof item.params.command === "string") approveCommand(item.params.command);
     }
-    for (const check of step.verification) if (check.kind === "command") { actions.add("terminal.exec"); commands.add(commandName(check.command)); }
+    for (const check of step.verification) if (check.kind === "command") { actions.add("terminal.exec"); approveCommand(check.command); }
     if (step.scope.access === "write") write = true;
     if (step.scope.isolation === "worktree") actions.add("git.worktree_add");
     if (step.verification.some((check) => check.kind === "git_diff_nonempty")) actions.add("git.diff");
@@ -59,10 +66,14 @@ export function scopeFor(steps: Pick<MissionStep, "executor" | "requiredCapabili
     projectRoots: [root],
     riskClasses: [...risks],
     capabilities: [...actions].sort(),
-    providers: { execution, allow: options.providers ?? null, localOnly: !!options.localOnly },
+    providers: { execution, allow: options.providers ?? null, localOnly: !!options.localOnly, sessions: {
+      steps: steps.filter((step) => step.executor.kind === "model").map((step, index) => ({ stepId: step.id ?? `unbound:${index}`, scope: { access: step.scope.access } })),
+      maxSessions: execution ? steps.filter((step) => step.executor.kind === "model").length + 2 * (options.budget ?? MODE_BUDGET[mode]).maxRetries : 0,
+      writeIncludesShell: true,
+    } },
     filesystem: { read: [root], write: write ? [root] : [] },
     browser: { enabled: browser, domains: "public" },
-    terminal: { enabled: commands.size > 0, commands: [...commands].sort() },
+    terminal: { enabled: commands.size > 0, commands: [...commands].sort(), executables: [...executables.values()] },
     git: { actions: [...git].sort() },
     network: { allowed: network },
     computer: { enabled: computer },
@@ -74,7 +85,7 @@ export function scopeFor(steps: Pick<MissionStep, "executor" | "requiredCapabili
 export function envelopeFrom(request: ScopeRequest, missionId: string, grantedBy: string, maxRuntimeMs: number, extraRoots: string[] = []): AuthorizationEnvelope {
   const now = Date.now();
   return {
-    ...request,
+    ...structuredClone(request),
     projectRoots: [...request.projectRoots, ...extraRoots],
     filesystem: { read: [...request.filesystem.read, ...extraRoots], write: request.filesystem.write.length ? [...request.filesystem.write, ...extraRoots] : [] },
     id: crypto.randomUUID(), missionId, grantedAt: now, grantedBy, expiresAt: now + Math.min(maxRuntimeMs, request.budget.maxRuntimeMs), revokedAt: null,
@@ -82,7 +93,7 @@ export function envelopeFrom(request: ScopeRequest, missionId: string, grantedBy
 }
 
 /** Parameter-level scope check for one action against an envelope. Returns why it is outside, or null. */
-export function scopeViolation(action: string, params: Record<string, unknown>, envelope: AuthorizationEnvelope, base?: string): string | null {
+export function scopeViolation(action: string, params: Record<string, unknown>, envelope: AuthorizationEnvelope, base?: string, executable?: Resolved | null): string | null {
   // Relative paths are judged where they will actually resolve: the step's working folder.
   const at = (value: unknown) => typeof value === "string" && value ? (isAbsolute(value) || !base ? value : resolve(base, value)) : null;
   const path = at(params.path);
@@ -96,6 +107,8 @@ export function scopeViolation(action: string, params: Record<string, unknown>, 
     if (!envelope.terminal.enabled) return "Terminal execution was not approved for this mission.";
     const command = typeof params.command === "string" ? commandName(params.command) : "";
     if (!envelope.terminal.commands.includes(command)) return `Command "${command}" is not in the approved command list (${envelope.terminal.commands.join(", ") || "none"}).`;
+    const identity = executable === undefined ? resolveCommand(String(params.command ?? ""), base) : executable;
+    if (!identity || !envelope.terminal.executables?.some((entry) => entry.file === identity.file && JSON.stringify(entry.prefix) === JSON.stringify(identity.prefix))) return `Resolved executable for "${command}" is not the approved executable identity; approve the new path explicitly.`;
     if (cwd && !withinAny(envelope.projectRoots, cwd)) return `Working folder ${cwd} is outside the approved project roots.`;
     return null;
   }
@@ -127,11 +140,11 @@ function grantFor(grants: GrantRow[], action: string, missionId: string | null):
 
 /**
  * The single permission decision every capability execution passes through.
- * - `oneTime`: the user just allowed this exact pending request.
+ * - `oneTime`: the user allowed this invocation or matching action within this skill run.
  * - `direct`: a workstation user invoked the action explicitly outside any mission (still asks for
  *   EXTERNAL_SIDE_EFFECT / DESTRUCTIVE / hard-approval actions unless `confirmed`).
  */
-export function decide(manifest: ActionManifest, params: Record<string, unknown>, context: { envelope: AuthorizationEnvelope | null; missionId: string | null; grants: GrantRow[]; oneTime?: boolean; direct?: { confirmed: boolean }; now?: number; base?: string }): PermissionDecision {
+export function decide(manifest: ActionManifest, params: Record<string, unknown>, context: { envelope: AuthorizationEnvelope | null; missionId: string | null; grants: GrantRow[]; oneTime?: boolean; direct?: { confirmed: boolean }; now?: number; base?: string; executable?: Resolved | null }): PermissionDecision {
   const risk = manifest.risk; const now = context.now ?? Date.now();
   const deny = (reason: string): PermissionDecision => ({ decision: "deny", reason, risk });
   const ask = (reason: string): PermissionDecision => ({ decision: "ask", reason, risk });
@@ -140,7 +153,7 @@ export function decide(manifest: ActionManifest, params: Record<string, unknown>
   const grant = grantFor(context.grants, manifest.id, context.missionId);
   if (grant === "never_allow") return deny(`A persistent "never allow" rule covers ${manifest.id}.`);
   if (grant === "read_only" && risk !== "READ") return deny(`A persistent "read only" rule covers ${manifest.id}.`);
-  if (context.oneTime) return allow("The user allowed this specific request once.");
+  if (context.oneTime) return allow("The user allowed this invocation or the matching action in this skill run.");
   if (context.direct) {
     if ((manifest.hardApproval || ALWAYS_ASK.includes(risk) || manifest.sensitive) && !context.direct.confirmed) return ask(`${manifest.id} is ${risk.toLowerCase().replaceAll("_", " ")}${manifest.sensitive ? " and privacy-sensitive" : ""}; explicit confirmation required.`);
     return allow("Invoked directly by the workstation user.");
@@ -153,7 +166,7 @@ export function decide(manifest: ActionManifest, params: Record<string, unknown>
   if (grant === "ask_every_time") return ask(`A persistent "ask every time" rule covers ${manifest.id}.`);
   if (!matches(envelope.capabilities, manifest.id)) return ask(`${manifest.id} is outside the approved capability list.`);
   if (!envelope.riskClasses.includes(risk)) return ask(`${risk} actions were not approved for this mission.`);
-  const violation = scopeViolation(manifest.id, params, envelope, context.base);
+  const violation = scopeViolation(manifest.id, params, envelope, context.base, context.executable);
   if (violation) return ask(violation);
   const elevated = grant === "always_allow" || grant === "allow_for_mission";
   if (envelope.alwaysAsk.includes(risk) && !(elevated && risk !== "DESTRUCTIVE")) return ask(`${risk.replaceAll("_", " ").toLowerCase()} actions always ask.`);
@@ -161,8 +174,20 @@ export function decide(manifest: ActionManifest, params: Record<string, unknown>
   return allow(`Inside mission authorization ${envelope.id}.`);
 }
 
+/** Extra approval can change provider/budget consent, never the child's declared access. */
+export function providerScopeViolation(task: { mission?: { missionId: string; stepId: string } | null; executionScope?: ProviderExecutionScope; cwd?: string }, envelope: AuthorizationEnvelope, step?: Pick<MissionStep, "id" | "scope">): string | null {
+  if (!task.mission || task.mission.missionId !== envelope.missionId) return "child belongs to another mission";
+  const authority = envelope.providers.sessions?.steps.find((item) => item.stepId === task.mission!.stepId);
+  if (!authority || !task.executionScope) return "provider-session authority is missing; replan and approve again";
+  if (step && (step.id !== task.mission.stepId || step.scope.access === "write" && authority.scope.access !== "write")) return "step exceeds approved provider-session authority";
+  if (task.executionScope.access === "write" && (authority.scope.access !== "write" || step && step.scope.access !== "write")) return "child exceeds step or mission provider-session authority";
+  if (!["read", "write"].includes(task.executionScope.access)) return "invalid child provider-session authority";
+  if (task.executionScope.access === "write" && (!task.cwd || !withinAny(envelope.filesystem.write, task.cwd))) return "provider write authority exceeds approved write roots";
+  return null;
+}
+
 /** Checks a child model task against the envelope before a delegated launch. */
-export function taskViolation(task: { provider: ProviderId; cwd?: string; decision: { recommended_provider: ProviderId } }, envelope: AuthorizationEnvelope, local: boolean, externalCallsUsed: number, now = Date.now()): string | null {
+export function taskViolation(task: { provider: ProviderId; cwd?: string; decision: { recommended_provider: ProviderId }; mission?: { missionId: string; stepId: string } | null; executionScope?: ProviderExecutionScope }, envelope: AuthorizationEnvelope, local: boolean, externalCallsUsed: number, now = Date.now(), step?: Pick<MissionStep, "id" | "scope">, sessionsUsed = 0): string | null {
   if (envelope.revokedAt) return "authorization revoked";
   if (envelope.expiresAt <= now) return "authorization expired";
   if (!envelope.providers.execution) return "provider execution was not approved";
@@ -170,5 +195,10 @@ export function taskViolation(task: { provider: ProviderId; cwd?: string; decisi
   if (envelope.providers.localOnly && !local) return "mission is local-only and this provider runs in the cloud";
   if (!local && externalCallsUsed >= envelope.budget.maxExternalModelCalls) return `external model call budget (${envelope.budget.maxExternalModelCalls}) exhausted`;
   if (!task.cwd || !withinAny(envelope.projectRoots, task.cwd)) return `working folder ${task.cwd ?? "unknown"} is outside the approved project roots`;
+  if (task.mission) {
+    const outside = providerScopeViolation(task, envelope, step);
+    if (outside) return outside;
+    if (sessionsUsed >= envelope.providers.sessions!.maxSessions) return "provider-session budget exhausted";
+  }
   return null;
 }

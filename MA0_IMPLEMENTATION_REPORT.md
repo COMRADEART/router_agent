@@ -2,6 +2,8 @@
 
 October 2, 2026 · branch `ma0-mission-architecture` · baseline `ea0e803` (clean tree, `main`).
 
+Updated for **M-A-0R**, following Review 0's **BUNNY_MA0_REVIEW_PASS_WITH_REMEDIATION**. The original four commits are preserved. Current closure and residual risks: [MA0_REMEDIATION_REPORT.md](MA0_REMEDIATION_REPORT.md); the review packet now requests a narrow remediation rereview.
+
 Architecture: [docs/MA0_ARCHITECTURE.md](docs/MA0_ARCHITECTURE.md) · [compatibility](docs/MA0_COMPATIBILITY.md) · [security](docs/MA0_SECURITY_MODEL.md) · [capabilities](docs/MA0_CAPABILITY_MODEL.md) · [state machine](docs/MA0_MISSION_STATE_MACHINE.md) · review packet: [MA0_CLAUDE_REVIEW_PACKET.md](MA0_CLAUDE_REVIEW_PACKET.md).
 
 ## Baseline (recorded before any edit)
@@ -16,7 +18,7 @@ Architecture: [docs/MA0_ARCHITECTURE.md](docs/MA0_ARCHITECTURE.md) · [compatibi
 | Host DB | `user_version` 2; tables tasks, projects, events, outcomes, devices, migrations, policies, settings, providers | live snapshot |
 | Live Host | PID 14188, instance `5b8d70f2-7429-48a1-b418-beacb31441f5`, running this checkout | `/health` |
 
-## Final gates
+## Reviewed M-A-0 gates (before Review 0)
 
 | Gate | Result | Log |
 |---|---|---|
@@ -30,14 +32,28 @@ Architecture: [docs/MA0_ARCHITECTURE.md](docs/MA0_ARCHITECTURE.md) · [compatibi
 
 Total: 362 tests (baseline 320), 0 failures.
 
+## M-A-0R gates
+
+| Gate | Remediation result | Evidence |
+|---|---|---|
+| `npm test` | **205/205 script + 166/166 app/Host/mission**, 0 failed/skipped | `test-results/ma0r/full-test.log` |
+| `npm run test:ui` | **20/20**, 0 failed/skipped | `test-results/ma0r/ui-test.log` |
+| typecheck | exit 0 | `typecheck.log` |
+| lint | 0 errors, the same 10 existing warnings | `lint.log` |
+| production build | exit 0; existing dependency directive notices; database service migration skipped with auth/database off | `build.log` |
+| Migration / legacy rollback read | Both current Host and pre-M2 backup snapshots: all old rows unchanged after two opens; actual `ea0e803` persistence code reads them; source main/WAL unchanged | `migration-evidence.json` |
+| Dev / built render | Desktop/mobile visible, no console/page errors or overflow; changed approval and skill cards and buttons pass with isolated RPC fixtures on both | `approval-ui-evidence.json`, `screenshots/ma0r-*` |
+
+**391 tests**, up from the reviewed 362; no tests removed. Raw production smoke's shorter body is its offline Host state, while dev reads the running Host; this is recorded, not represented as an identical connected baseline. Fixture QA verifies the same mission authority UI on both outputs without changing the Host bridge or running any provider. The existing optional share-card placeholder notice remains outside this targeted utility remediation.
+
 ## IMPLEMENTED
 
 * **Mission layer** — persisted missions and step graphs; validated mission/step state machines; DAG validation (cycles, unknown dependencies, size); dependency-aware scheduling with parallel independent steps; configurable concurrency (3), steps (12), retries per step (2), replans (2), runtime (120 min), active missions (3).
-* **Model steps through TaskManager** — `TaskManager.submit(…, delegated)` and `TaskManager.approveDelegated()`; children routed by the unchanged BunnyRouter; `approval.delegated` audit event; `approve(id)` unchanged. MissionManager imports no adapter.
-* **Scoped mission authorization** — envelope derived from the plan (including skill internals), persisted on approval, re-checked per child and per capability call; Allow once / Deny permission requests; budgets (external model calls, runtime, retries, optional token ceiling).
+* **Model steps through TaskManager** — `TaskManager.submit(…, delegated)` and `TaskManager.approveDelegated()`; children routed by the unchanged BunnyRouter, with immutable execution scope carried into the existing provider adapters. Codex read-only sandbox and Claude Read-only tools follow explicit access, regardless of role. Legacy unscoped direct defaults remain. MissionManager imports no provider adapter.
+* **Scoped mission authorization** — displayed plan binds step access, finite provider sessions including retries, roots and budgets. Child ≤ step ≤ envelope is checked at launch, including additional direct approval. Retry/reroute preserve access; replan requires a new approval. Direct, envelope, delegated, additional capability and paired-device approvals have distinct audit provenance. Skill requests accurately say **Allow this skill run**.
 * **Capability Bus** — manifests, health, single decision function, recorded/redacted runs, events, artifacts, abort/timeout, grant policies enforced (`always_allow, allow_for_mission, ask_every_time, read_only, never_allow`).
-* **Local capabilities** — filesystem (read/list/exists/write/delete), terminal (shell-free exec with escalation), git (status/diff/log/commit/worktree add+remove/merge with conflict abort), notifications (Inbox).
-* **Browser Runtime** — isolated Bunny profile; navigate, search, read, extract, metadata, click, type, wait, screenshot, download, tabs; SSRF guard; evidence artifacts. Verified against a real page in Chrome headless.
+* **Local capabilities** — filesystem, terminal (canonical executable identity captured at permission time), git (owned merge transaction with independently bounded conflict/failure/Stop cleanup and explicit results), notifications. Direct capability/skill cwd validation rejects malformed/unauthorized paths without creating folders.
+* **Browser Runtime** — isolated profile and checking proxy; all DNS answers checked before each connection, checked literal IP pinned, redirects/subresources/CONNECT/WebSockets covered. Real isolated-browser attempts reach a disposable Bunny Host **zero times**; public fixture navigation succeeds.
 * **Computer Runtime (Windows)** — list_windows, read_controls, focus_window, invoke_control (Invoke/Toggle/Select/Expand), type (ValuePattern), capture, open_app (allowlist). `list_windows` verified live; others verified for refusal/permission paths only (see NOT TESTED).
 * **GitHub** — `pr_list`, `issue_list`, `repo_view` through the signed-in gh CLI (health verified; queries not executed in tests).
 * **Skill Library** — 12 built-in skills, versioning, failure stop + repair candidate, verified promotion, retired history, semantic record/replay.
@@ -75,14 +91,13 @@ Total: 362 tests (baseline 320), 0 failures.
 * Automatic (LLM-driven) skill repair; repaired steps are supplied explicitly.
 * Raw mouse/keyboard input (intentionally not offered).
 * Windows wake-from-sleep, Android background push (unchanged from M3: unavailable).
-* DNS pinning for the browser SSRF guard.
 
 ## NOT TESTED
 
 * **Any live provider mission.** No Codex/Claude/Ollama child task was launched by a mission; mission→TaskManager integration is tested with fake adapters through the real TaskManager. No external model quota was spent.
 * Computer Runtime `focus_window`, `invoke_control`, `type`, `capture`, `open_app` success paths on the real desktop (not run to avoid disturbing the user's session).
 * GitHub queries against the API; `browser.search` against DuckDuckGo (network); browser tests used a local page.
-* Production-build browser render and the Windows standalone package (only `npm run build` was run).
+* The Windows standalone package; dev and production browser rendering and fixture approval UI are now tested.
 * Opening an M-A-0 database with the released v10/v13 binaries.
 * The live installed Host after restart (not restarted).
 * Public-HTTPS phone flow for missions.
@@ -104,8 +119,8 @@ Found by tests or live QA, fixed, and covered by tests: reroute could deny the o
 
 ## Git
 
-Commits on `ma0-mission-architecture` (no push, no history rewrite): `32ce245` backend, `dbab79e` UI, then the documentation/report commit (see the review packet for the final HEAD). Untracked evidence lives under ignored `test-results/ma0/` and `screenshots/ma0/`.
+Original commits `32ce245`, `dbab79e`, `60d54e0`, `33723ee` are preserved. Remediation code commits: `02d6a7e` (authority, approval clarity, safe Git cancellation and low findings), `b975026` (browser DNS isolation), followed by the documentation/handoff commit containing this report. No push, merge, reset, clean or history rewrite. New local evidence lives under ignored `test-results/ma0r/` and `screenshots/ma0r-*`; the pre-existing untracked Review 0 report is preserved.
 
 ## Verdict
 
-**BUNNY_MA0_IMPLEMENTATION_COMPLETE** — the architecture is implemented and wired end to end, repository gates pass (362 tests, typecheck, lint 0 errors, build), migration compatibility is proven on live data, the direct-task regression gate passes, documentation and the review packet exist, and no known critical regression is hidden. Live-provider missions, the Computer Runtime's action paths and the phone/public flow are left to M-A-1 as listed under NOT TESTED.
+Original architecture verdict: **BUNNY_MA0_IMPLEMENTATION_COMPLETE**. Remediation verdict: **BUNNY_MA0_REMEDIATION_COMPLETE** — H1/M2/M3 and L1/L2/L3 are fixed with regression evidence; M1 is mitigated through explicit bounded session authority, matching desktop/phone consent and honest provider-internal side-effect disclosure. All 391 tests, typecheck, lint with no new warnings, build, migration and legacy regressions pass. Provider CLI trust, same-path binary replacement, failed/unproven Git cleanup and hard crashes remain documented limits. No live provider mission quota was used; M-A-1 owns live acceptance.

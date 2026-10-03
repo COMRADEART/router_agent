@@ -1,6 +1,7 @@
 import type { ArtifactStore } from "../artifacts.server.ts";
 import { decide } from "../authorization.server.ts";
 import { redact, type MissionStore } from "../store.server.ts";
+import { resolveCommand, type Resolved } from "./process.server.ts";
 import type {
   ActionManifest, AuthorizationEnvelope, CapabilityAvailability, CapabilityManifest, CapabilityResult, CapabilityRun, CapabilityStatus,
   PermissionDecision, RiskClass,
@@ -16,6 +17,8 @@ export type ExecutionContext = {
   dataDirectory: string;
   signal: AbortSignal;
   timeoutMs: number;
+  /** Resolved before permission evaluation; terminal must launch this identity without a second PATH lookup. */
+  executable?: Resolved | null;
 };
 
 /** A capability provider. Adapters report unavailable/unconfigured/unsupported truthfully; they never fake success. */
@@ -38,7 +41,7 @@ export type CapabilityRequest = {
   cwd: string;
   roots: string[];
   oneTime?: boolean;
-  /** The single action a user allowed once for this step; other actions in the same skill still ask. */
+  /** Matching action allowed for this capability invocation / this skill run; other skill actions still ask. */
   oneTimeAction?: string | null;
   direct?: { confirmed: boolean };
   timeoutMs?: number;
@@ -59,6 +62,9 @@ export class CapabilityBus {
   store: MissionStore; artifacts: ArtifactStore; dataDirectory: string;
   emit: (type: string, detail: string, missionId: string | null) => void;
   inFlight = new Map<string, AbortController>();
+  settling = new Map<string, Promise<void>>();
+  cancelledMissions = new Set<string>(); cancelledSteps = new Set<string>();
+  clearCancellation(missionId: string) { this.cancelledMissions.delete(missionId); }
   constructor(store: MissionStore, artifacts: ArtifactStore, dataDirectory: string, emit: (type: string, detail: string, missionId: string | null) => void) {
     this.store = store; this.artifacts = artifacts; this.dataDirectory = dataDirectory; this.emit = emit;
   }
@@ -96,17 +102,24 @@ export class CapabilityBus {
     return escalated && RANK.indexOf(escalated) > RANK.indexOf(found.manifest.risk) ? escalated : found.manifest.risk;
   }
   /** Permission decision only; no side effects. */
-  decision(request: CapabilityRequest): PermissionDecision {
+  decision(request: CapabilityRequest, executable?: Resolved | null): PermissionDecision {
     const found = this.find(request.action);
     if (!found) return { decision: "deny", reason: `Unknown capability action ${request.action}.`, risk: "READ" };
     const risk = this.riskOf(request.action, request.params) ?? found.manifest.risk;
-    return decide({ ...found.manifest, risk }, request.params, { envelope: request.envelope, missionId: request.missionId, grants: this.store.grants(), oneTime: request.oneTime || (!!request.oneTimeAction && request.oneTimeAction === request.action), direct: request.direct, base: request.cwd });
+    return decide({ ...found.manifest, risk }, request.params, { envelope: request.envelope, missionId: request.missionId, grants: this.store.grants(), oneTime: request.oneTime || (!!request.oneTimeAction && request.oneTimeAction === request.action), direct: request.direct, base: request.cwd, executable });
   }
-  cancel(filter: { missionId?: string; stepId?: string }) {
+  async cancel(filter: { missionId?: string; stepId?: string }) {
+    if (filter.missionId) this.cancelledMissions.add(filter.missionId);
+    if (filter.stepId) this.cancelledSteps.add(filter.stepId);
+    const settling: Promise<void>[] = [];
     for (const [runId, controller] of this.inFlight) {
       const run = this.store.run(runId);
-      if ((filter.missionId && run.missionId === filter.missionId) || (filter.stepId && run.stepId === filter.stepId)) controller.abort(new Error("Cancelled by Bunny-A."));
+      if ((filter.missionId && run.missionId === filter.missionId) || (filter.stepId && run.stepId === filter.stepId)) {
+        controller.abort(new Error("Cancelled by Bunny-A."));
+        const done = this.settling.get(runId); if (done) settling.push(done);
+      }
     }
+    await Promise.all(settling);
   }
   /**
    * Decides, then (only when allowed) executes and records. An "ask" decision executes nothing and
@@ -114,7 +127,9 @@ export class CapabilityBus {
    */
   async request(request: CapabilityRequest): Promise<CapabilityOutcome> {
     const found = this.find(request.action);
-    const decision = this.decision(request);
+    const executable = request.action === "terminal.exec" ? resolveCommand(String(request.params.command ?? ""), request.cwd) : undefined;
+    const cancelled = request.missionId && this.cancelledMissions.has(request.missionId) || request.stepId && this.cancelledSteps.has(request.stepId);
+    const decision: PermissionDecision = cancelled ? { decision: "deny", reason: "Execution was cancelled by Bunny-A.", risk: this.riskOf(request.action, request.params) ?? "READ" } : this.decision(request, executable);
     // Typed text and file bodies may be private; records keep their size, not their content.
     const recorded = { ...request.params };
     for (const key of ["text", "content"]) if (typeof recorded[key] === "string") recorded[key] = `[${(recorded[key] as string).length} characters]`;
@@ -129,7 +144,7 @@ export class CapabilityBus {
     };
     const finish = (status: CapabilityRun["status"], summary: string, result: CapabilityResult | null, artifactIds: string[] = []): CapabilityOutcome => {
       const finishedAt = Date.now();
-      const run = { ...base, status, summary: summary.slice(0, 2000), evidence: result?.evidence.slice(0, 40) ?? [], artifactIds, finishedAt, durationMs: finishedAt - startedAt };
+      const run = { ...base, ...(result?.cleanup ? { cleanup: result.cleanup } : {}), status, summary: summary.slice(0, 2000), evidence: result?.evidence.slice(0, 40) ?? [], artifactIds, finishedAt, durationMs: finishedAt - startedAt };
       this.store.saveRun(run);
       this.emit(status === "succeeded" ? "capability.completed" : "capability.failed", `${request.action} ${status}: ${run.summary}`, request.missionId);
       return { decision, run, result, artifactIds };
@@ -142,13 +157,15 @@ export class CapabilityBus {
     }
     this.emit("authorization.granted", `${request.action}: ${decision.reason}`, request.missionId);
     this.store.saveRun(base);
-    this.emit("capability.started", `${request.action} started.`, request.missionId);
     const controller = new AbortController(); this.inFlight.set(base.id, controller);
+    let settled!: () => void;
+    this.settling.set(base.id, new Promise<void>((done) => { settled = done; }));
+    this.emit("capability.started", `${request.action} started.`, request.missionId);
     const timeoutMs = Math.min(request.timeoutMs ?? found.manifest.timeoutMs, 30 * 60_000);
     const timer = setTimeout(() => controller.abort(new Error(`Timed out after ${timeoutMs} ms.`)), timeoutMs);
     let result: CapabilityResult;
     try {
-      result = await found.adapter.execute(request.action, request.params, { missionId: request.missionId, stepId: request.stepId, cwd: request.cwd, roots: request.roots, dataDirectory: this.dataDirectory, signal: controller.signal, timeoutMs });
+      result = await found.adapter.execute(request.action, request.params, { missionId: request.missionId, stepId: request.stepId, cwd: request.cwd, roots: request.roots, dataDirectory: this.dataDirectory, signal: controller.signal, timeoutMs, executable });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const timedOut = controller.signal.aborted && /timed out/i.test(String(controller.signal.reason));
@@ -159,7 +176,12 @@ export class CapabilityBus {
       try { artifactIds.push((await this.artifacts.create({ missionId: request.missionId, stepId: request.stepId, type: item.type, title: item.title, inline: item.inline, path: item.path, mediaType: item.mediaType, provenance: `bunny:capability:${base.id}`, verification: "unverified" })).id); }
       catch (error) { result.evidence.push(`Artifact not stored: ${error instanceof Error ? error.message : String(error)}`); }
     }
-    return finish(result.status, result.summary, result, artifactIds);
+    try { return finish(result.status, result.summary, result, artifactIds); }
+    finally { this.settling.delete(base.id); settled(); }
   }
-  async close() { for (const adapter of this.adapters.values()) await adapter.close?.().catch(() => {}); }
+  async close() {
+    for (const controller of this.inFlight.values()) controller.abort(new Error("Bunny Capability Bus closed."));
+    await Promise.all(this.settling.values());
+    for (const adapter of this.adapters.values()) await adapter.close?.().catch(() => {});
+  }
 }

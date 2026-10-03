@@ -3,7 +3,9 @@ import { basename, dirname, join, relative } from "node:path";
 import { canonical, scopedPath, within } from "../paths.server.ts";
 import type { ActionManifest, CapabilityResult, RiskClass } from "../types.ts";
 import type { CapabilityAdapter, ExecutionContext } from "./bus.server.ts";
-import { resolveCommand, runCommand, tail } from "./process.server.ts";
+import { resolveCommand, runCommand, runProcess, tail } from "./process.server.ts";
+import { mergeTransaction } from "./git-merge.server.ts";
+import { commandName } from "../authorization.server.ts";
 
 const READ_LIMIT = 1024 * 1024;
 const input = (name: string, type: ActionManifest["inputs"][number]["type"], required: boolean, description: string) => ({ name, type, required, description });
@@ -97,7 +99,7 @@ export class TerminalCapability implements CapabilityAdapter {
     return { availability: "available" as const, detail: `Shell-free process execution. npm via ${resolveCommand("npm") ? "bundled npm CLI" : "unavailable npm CLI"}.` };
   }
   riskFor(_action: string, params: Record<string, unknown>): RiskClass | null {
-    const command = typeof params.command === "string" ? params.command.toLowerCase().replace(/\.exe$/, "") : "";
+    const command = typeof params.command === "string" ? commandName(params.command) : "";
     const args = Array.isArray(params.args) ? params.args.map(String) : [];
     if (command.endsWith("git") && args.length && DESTRUCTIVE_GIT.some((pattern) => pattern.test(args[0]))) return "DESTRUCTIVE";
     if (command.endsWith("git") && args[0] === "push") return "EXTERNAL_SIDE_EFFECT";
@@ -109,7 +111,9 @@ export class TerminalCapability implements CapabilityAdapter {
   async execute(_action: string, params: Record<string, unknown>, context: ExecutionContext): Promise<CapabilityResult> {
     const command = str(params, "command"); const args = argv(params); const cwd = cwdOf(params, context);
     const timeoutMs = Math.min(typeof params.timeoutMs === "number" && params.timeoutMs > 0 ? params.timeoutMs : context.timeoutMs, context.timeoutMs);
-    const result = await runCommand(command, args, { cwd, signal: context.signal, timeoutMs });
+    const identity = context.executable === undefined ? resolveCommand(command, cwd) : context.executable;
+    if (!identity) throw new Error(`Command "${command}" is not an executable Bunny-A can launch without a shell.`);
+    const result = await runProcess(identity, args, { cwd, signal: context.signal, timeoutMs });
     const line = `${command} ${args.join(" ")}`.trim();
     const output = { command, args, cwd, exitCode: result.exitCode, stdout: tail(result.stdout, 20_000), stderr: tail(result.stderr, 8_000), durationMs: result.durationMs, timedOut: result.timedOut };
     const evidence = [`${line} in ${cwd} → exit ${result.exitCode ?? "none"} after ${result.durationMs} ms`];
@@ -201,14 +205,7 @@ export class GitCapability implements CapabilityAdapter {
     if (action === "git.merge") {
       const branch = str(params, "branch");
       if (!/^bunny\/[A-Za-z0-9._-]{1,80}$/.test(branch)) return fail("Only bunny/* branches can be merged by a mission.");
-      const result = await this.git(["merge", "--no-ff", "--no-edit", branch], cwd, context, 120_000);
-      if (result.exitCode !== 0) {
-        const conflicts = (await this.git(["diff", "--name-only", "--diff-filter=U"], cwd, context)).stdout.split(/\r?\n/).filter(Boolean);
-        await this.git(["merge", "--abort"], cwd, context);
-        return { ...fail(`Merge of ${branch} conflicted and was aborted; the working tree is unchanged.`, { merged: false, conflict: conflicts }), errorCategory: "workspace_conflict" };
-      }
-      const head = (await this.git(["rev-parse", "HEAD"], cwd, context)).stdout.trim();
-      return ok(`Merged ${branch} → ${head.slice(0, 12)}.`, { merged: true, conflict: [], head }, [`HEAD ${head}`]);
+      return mergeTransaction(branch, cwd, context);
     }
     return { ok: false, status: "unsupported", summary: `${action} is not supported.`, output: null, evidence: [] };
   }

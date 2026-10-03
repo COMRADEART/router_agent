@@ -4,7 +4,7 @@ import type { TaskManager } from "../bunny-host/manager.server.ts";
 import type { HostEvent } from "../bunny-host/contracts.ts";
 import type { Mode, OrchTask, ProviderId, TaskConstraints, VerifySpec } from "../orch/types.ts";
 import { ArtifactStore } from "./artifacts.server.ts";
-import { envelopeFrom, MODE_BUDGET, scopeFor, taskViolation } from "./authorization.server.ts";
+import { envelopeFrom, MODE_BUDGET, providerScopeViolation, scopeFor, taskViolation } from "./authorization.server.ts";
 import { CapabilityBus, type CapabilityAdapter, type CapabilityRequest } from "./capabilities/bus.server.ts";
 import { BrowserCapability } from "./capabilities/browser.server.ts";
 import { ComputerCapability } from "./capabilities/computer.server.ts";
@@ -50,11 +50,17 @@ export class MissionManager {
   skills: SkillLibrary; workspace: WorkspaceCoordinator; triggers: TriggerEngine; dataDirectory: string;
   cached: MissionConfig; recovered = false; ticking = new Set<string>(); again = new Set<string>(); pending = new Map<string, ReturnType<typeof setImmediate>>();
   watchdog: ReturnType<typeof setInterval> | null = null; healthTimer: ReturnType<typeof setInterval> | null = null; closed = false;
+  stopping = new Set<string>();
   listener = (event: HostEvent) => this.onHostEvent(event);
 
   constructor(tasks: TaskManager, options: MissionManagerOptions) {
     this.tasks = tasks; this.dataDirectory = options.dataDirectory;
     this.store = new MissionStore(tasks.db);
+    tasks.missionScopeCheck = (task) => {
+      const mission = this.store.mission(task.mission!.missionId);
+      const envelope = mission.authorizationId ? this.store.authorization(mission.authorizationId) : null;
+      return envelope ? providerScopeViolation(task, envelope, this.store.step(task.mission!.stepId)) : "no approved mission envelope";
+    };
     this.cached = this.store.config();
     this.artifacts = new ArtifactStore(this.store, options.dataDirectory);
     this.memory = new MissionMemory(this.store);
@@ -123,7 +129,7 @@ export class MissionManager {
     try { this.inbox.ingest(event); } catch { /* Inbox is advisory. */ }
     if (event.taskId && (TASK_END.test(event.type) || event.type === "approval.accepted")) {
       const step = this.store.stepForTask(event.taskId);
-      if (step) setImmediate(() => { try { if (event.type === "approval.accepted") this.childApprovedDirectly(step.id, event.taskId!); else void this.finishModelStep(step.id, event.taskId!); } catch (error) { this.emit("mission.error", `Step ${step.id}: ${error instanceof Error ? error.message : String(error)}`, step.missionId); } });
+      if (step) setImmediate(() => { try { if (this.stopping.has(step.missionId)) return; if (event.type === "approval.accepted") this.childApprovedDirectly(step.id, event.taskId!); else void this.finishModelStep(step.id, event.taskId!); } catch (error) { this.emit("mission.error", `Step ${step.id}: ${error instanceof Error ? error.message : String(error)}`, step.missionId); } });
     }
     if (this.cached.triggersEnabled) void this.triggers.onEvent(event, true);
   }
@@ -227,16 +233,22 @@ export class MissionManager {
     const active = this.store.missionsIn(MISSION_ACTIVE).length;
     if (active >= this.cached.limits.maxActiveMissions) throw new Error(`${active} missions are already active (limit ${this.cached.limits.maxActiveMissions}).`);
     const steps = this.store.steps(id);
+    const requestedScope = mission.requestedScope;
+    const plannedAuthority = steps.filter((step) => step.executor.kind === "model" && step.state !== "completed").map((step) => ({ stepId: step.id, scope: { access: step.scope.access } }));
+    if (plannedAuthority.length && (!requestedScope.providers.sessions || JSON.stringify(requestedScope.providers.sessions.steps) !== JSON.stringify(plannedAuthority))) throw new Error("Provider execution scope changed or is missing; replan and review the new scope before approval.");
     const extra = steps.some((step) => step.scope.isolation === "worktree") ? [join(this.dataDirectory, "worktrees", id.slice(0, 8))] : [];
-    const envelope = envelopeFrom(mission.requestedScope, id, by, this.cached.limits.maxMissionRuntimeMs, extra);
+    const envelope = envelopeFrom(requestedScope, id, by, this.cached.limits.maxMissionRuntimeMs, extra);
     this.store.saveAuthorization(envelope);
     this.memory.record(id, "user_decision", "Mission approved", `${by} approved ${envelope.riskClasses.join("/")} in ${envelope.projectRoots.join(", ")} until ${new Date(envelope.expiresAt).toISOString()}.`, `user:${by}`, true);
+    this.emit("approval.mission_envelope", `Mission envelope ${envelope.id} by ${by}; provider sessions ${JSON.stringify(envelope.providers.sessions)}.`, id);
+    if (by.startsWith("device:")) this.emit("approval.remote_device", `Mission envelope ${envelope.id} approved by paired ${by}; same scope as workstation approval.`, id);
     mission = this.setMission(mission, { state: "ready", authorizationId: envelope.id }, "authorization.granted", `Mission authorization ${envelope.id} granted by ${by}: roots ${envelope.projectRoots.join(", ")}; ${envelope.riskClasses.join(", ")}; terminal [${envelope.terminal.commands.join(", ")}]; git [${envelope.git.actions.join(", ")}]; browser ${envelope.browser.enabled ? "on" : "off"}; computer ${envelope.computer.enabled ? "on" : "off"}; expires ${new Date(envelope.expiresAt).toISOString()}.`);
     this.inbox.resolve(id, { kinds: ["requires_approval"] });
     if (start) mission = this.start(mission);
     return this.view(mission);
   }
   start(mission: Mission): Mission {
+    this.bus.clearCancellation(mission.id);
     const next = this.setMission(mission, { state: "running", startedAt: mission.startedAt ?? Date.now() }, "mission.started", `Mission "${mission.title}" started.`);
     this.schedule(next.id);
     return next;
@@ -256,7 +268,7 @@ export class MissionManager {
   }
   async tickOnce(id: string) {
     let mission = this.store.mission(id);
-    if (mission.state !== "running" || !this.cached.enabled) return;
+    if (mission.state !== "running" || !this.cached.enabled || this.stopping.has(id)) return;
     const envelope = mission.authorizationId ? this.store.authorization(mission.authorizationId) : null;
     if (!envelope) { await this.failMission(mission, "permission_required", "Mission has no authorization.", null); return; }
     const limit = Math.min(envelope.budget.maxRuntimeMs, this.cached.limits.maxMissionRuntimeMs);
@@ -269,7 +281,7 @@ export class MissionManager {
       if (busy >= this.cached.limits.maxConcurrentAgents) break;
       if (await this.launch(mission, this.store.step(step.id), envelope)) busy++;
       mission = this.store.mission(id);
-      if (mission.state !== "running") return;
+      if (mission.state !== "running" || this.stopping.has(id)) return;
     }
     this.evaluate(this.store.mission(id));
   }
@@ -323,6 +335,7 @@ export class MissionManager {
       if (!existsSync(join(mission.root, ".git"))) workspace = mission.root;
       else {
         const outcome = await this.bus.request(this.capabilityRequest(mission, step, envelope, "git.worktree_add", { name: `${step.role.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 20)}-${step.id.slice(0, 6)}` }, mission.root));
+        if (this.stopping.has(mission.id) || this.store.mission(mission.id).state !== "running") return false;
         if (outcome.decision.decision === "ask") { this.askPermission(mission, step, "git.worktree_add", outcome.decision.risk, outcome.decision.reason, "execute"); return false; }
         const path = (outcome.result?.output as { path?: string } | null)?.path;
         if (!outcome.run || outcome.run.status !== "succeeded" || !path) { this.stepFailed(mission, this.markRunning(step, null, null), "workspace_conflict", `Could not create an isolated worktree: ${outcome.run?.summary ?? "no result"}`); return false; }
@@ -372,7 +385,7 @@ export class MissionManager {
     const spec = step.verification.find((check) => check.kind === "task_spec") as { kind: "task_spec"; spec: VerifySpec } | undefined;
     const mode: Mode = step.reasoning === "deep" ? "deep" : step.reasoning === "light" ? "fast" : mission.mode;
     let task: OrchTask;
-    const submit = (input: TaskConstraints) => this.tasks.submit({ prompt, mode, projectId: mission.projectId, override: "auto", constraints: input, verify: spec?.spec ?? null }, { missionId: mission.id, stepId: step.id, cwd: workspace });
+    const submit = (input: TaskConstraints) => this.tasks.submit({ prompt, mode, projectId: mission.projectId, override: "auto", constraints: input, verify: spec?.spec ?? null }, { missionId: mission.id, stepId: step.id, cwd: workspace, executionScope: { access: step.scope.access } });
     try { task = submit(constraints); }
     catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -390,7 +403,8 @@ export class MissionManager {
       return false;
     }
     const local = this.tasks.live().find((provider) => provider.id === task.provider)?.local_or_cloud === "local";
-    const violation = taskViolation(task, envelope, local, usedExternal);
+    const sessionsUsed = mission.accounting.externalModelCalls + mission.accounting.localModelCalls;
+    const violation = taskViolation(task, envelope, local, usedExternal, Date.now(), step, sessionsUsed);
     if (violation) {
       // The child stays waiting_for_approval: the user may approve it directly or through the request.
       this.setStep(step, { taskId: task.id, workspace }, "mission.step.child_created", `${step.role} child task ${task.id} routed to ${task.provider}.`);
@@ -398,7 +412,7 @@ export class MissionManager {
       return false;
     }
     try {
-      this.tasks.approveDelegated(task.id, { missionId: mission.id, stepId: step.id, authorizationId: envelope.id, check: (child) => taskViolation(child, envelope, local, usedExternal) });
+      this.tasks.approveDelegated(task.id, { missionId: mission.id, stepId: step.id, authorizationId: envelope.id, check: (child) => taskViolation(child, envelope, this.tasks.live().find((provider) => provider.id === child.provider)?.local_or_cloud === "local", usedExternal, Date.now(), this.store.step(step.id), sessionsUsed) });
     } catch (error) {
       this.stepFailed(mission, this.markRunning(step, task.id, task.provider, workspace), "provider_unavailable", error instanceof Error ? error.message : String(error));
       return false;
@@ -428,7 +442,7 @@ export class MissionManager {
         result = {
           ok: status === "succeeded", summary: outcome.run?.summary ?? outcome.decision.reason, artifactIds: outcome.artifactIds, runId: outcome.run?.id ?? null, output: outcome.result?.output ?? null,
           permission: outcome.decision.decision === "ask" ? { action: step.executor.action, risk: outcome.decision.risk, reason: outcome.decision.reason } : null,
-          category: status === "succeeded" ? null : this.capabilityCategory(outcome.result, status),
+          category: status === "succeeded" ? null : outcome.result?.cleanup?.ok === false ? "permission_required" : this.capabilityCategory(outcome.result, status),
         };
       } else if (step.executor.kind === "skill") {
         const run = await this.skills.run(step.executor.skillId, step.executor.params, { missionId, stepId, envelope, origin: `mission:${missionId}`, cwd: workspace, roots: envelope.projectRoots, oneTimeAction: step.approvedOnce?.action ?? null, timeoutMs: step.timeoutMs });
@@ -440,7 +454,7 @@ export class MissionManager {
         };
       } else return;
       step = this.store.step(stepId);
-      if (step.state !== "running") return; // stopped meanwhile
+      if (step.state !== "running" || this.stopping.has(missionId)) return; // stopped meanwhile
       const runtimeMs = Date.now() - started;
       step = this.setStep(step, { capabilityRunId: result.runId, accounting: { ...step.accounting, runtimeMs: step.accounting.runtimeMs + runtimeMs, deterministic: true, local: true }, attempts: step.attempts.map((attempt, index) => index === step.attempts.length - 1 ? { ...attempt, capabilityRunId: result.runId } : attempt) });
       if (result.permission) { this.workspace.release(stepId); this.askPermission(this.store.mission(missionId), step, result.permission.action, result.permission.risk as PermissionRequest["risk"], result.permission.reason, "execute"); return; }
@@ -475,6 +489,7 @@ export class MissionManager {
     if (!lock.ok) this.emit("mission.step.workspace_warning", `${step.role} was approved directly while ${lock.conflict.root} is held ${lock.conflict.mode} by step ${lock.conflict.stepId}; it runs without exclusive ownership (step ${step.id}).`, step.missionId);
     this.markRunning(step, taskId, task.provider);
     const mission = this.store.mission(step.missionId);
+    if (this.stopping.has(mission.id)) return;
     if (mission.state === "waiting_for_user") this.setMission(mission, { state: "running" }, "mission.resumed", "A pending child task was approved directly by the user.");
   }
   async finishModelStep(stepId: string, taskId: string) {
@@ -496,6 +511,7 @@ export class MissionManager {
     const artifact = await this.artifacts.create({ missionId: mission.id, stepId: step.id, type: step.expectedArtifacts[0] ?? "text", title: `${step.role} output`, inline: output || "(no output)", mediaType: "text/plain", provenance: `provider:${task.provider}:${task.id}`, verification: "unverified" });
     this.memory.record(mission.id, "agent_conclusion", `${step.role} conclusion`, output.split(/\r?\n/).filter(Boolean).slice(-6).join(" ").slice(0, 1500), `provider:${task.provider}:${task.id}`, false);
     current = this.store.step(step.id);
+    if (this.stopping.has(mission.id) || current.state !== "running") return;
     const summary = (output.split(/\r?\n/).filter(Boolean).slice(-4).join(" ") || "Provider produced no output.").slice(0, 1500);
     await this.verifyAndComplete(mission, current, { summary, artifactIds: [artifact.id], output, task });
   }
@@ -590,7 +606,9 @@ export class MissionManager {
     this.store.saveRequest({ ...request, resolvedAt: Date.now(), resolution: decision, resolvedBy: by });
     this.inbox.resolve(request.missionId, { requestId });
     this.inbox.resolve(request.missionId, { kinds: ["requires_attention"] });
-    this.memory.record(request.missionId, "user_decision", `${request.action} ${decision === "allow_once" ? "allowed once" : "denied"}`, `${by}: ${request.reason}`, `user:${by}`, true);
+    this.memory.record(request.missionId, "user_decision", `${request.action} ${decision === "allow_once" ? (step.executor.kind === "skill" ? "allowed for this skill run" : "allowed once") : "denied"}`, `${by}: ${request.reason}`, `user:${by}`, true);
+    this.emit("approval.additional_capability", `${request.action} ${decision} by ${by}; request ${requestId}; scope ${step.executor.kind === "skill" ? "this skill run, matching action within approved roots" : "this action"}.`, request.missionId);
+    if (by.startsWith("device:")) this.emit("approval.remote_device", `Additional request ${requestId} answered by paired ${by}: ${decision}.`, request.missionId);
     let mission = this.store.mission(request.missionId);
     if (mission.state === "waiting_for_user") mission = this.setMission(mission, { state: "running" }, "mission.resumed", `${by} answered request ${requestId}.`);
     this.emit(decision === "allow_once" ? "authorization.granted" : "authorization.denied", `${request.action} for step ${step.id}: ${decision} by ${by} (request ${requestId}).`, request.missionId);
@@ -603,7 +621,7 @@ export class MissionManager {
     if (request.action === "provider.execute" && step.taskId) {
       // Explicit user approval of that child task. If the provider stopped being eligible meanwhile,
       // the step fails honestly instead of staying stuck behind an answered request.
-      try { this.tasks.approve(step.taskId); }
+      try { this.tasks.approve(step.taskId, by); }
       catch (error) {
         const current = this.store.step(step.id);
         if (current.state === "waiting_for_approval") this.stepFailed(this.store.mission(mission.id), this.markRunning(current, step.taskId, this.tasks.db.get(step.taskId).provider), "provider_unavailable", error instanceof Error ? error.message : String(error));
@@ -624,7 +642,7 @@ export class MissionManager {
 
   // ── stop / retry / replan ─────────────────────────────────────────────────
   async cancelChildren(missionId: string, detail: string) {
-    this.bus.cancel({ missionId });
+    await this.bus.cancel({ missionId });
     for (const step of this.store.steps(missionId)) {
       if (step.taskId) {
         const task = (() => { try { return this.tasks.db.get(step.taskId!); } catch { return null; } })();
@@ -636,6 +654,10 @@ export class MissionManager {
   async stop(id: string, by: string): Promise<MissionView> {
     const mission = this.store.mission(id);
     if (["completed", "stopped"].includes(mission.state)) throw new Error("Mission has already ended.");
+    if (this.stopping.has(id)) throw new Error("Mission Stop is already in progress.");
+    this.stopping.add(id);
+    const activeRuns = new Set(this.store.runs({ missionId: id, status: "running", limit: 500 }).map((run) => run.id));
+    try {
     await this.cancelChildren(id, `Mission stopped by ${by}.`);
     for (const step of this.store.steps(id)) if (!["completed", "skipped", "stopped", "failed"].includes(step.state)) {
       const attempts = step.attempts.map((attempt, index) => index === step.attempts.length - 1 && attempt.outcome === "running" ? { ...attempt, finishedAt: Date.now(), outcome: "stopped" as const, category: "user_stopped" as const, detail: `Stopped by ${by}` } : attempt);
@@ -644,8 +666,11 @@ export class MissionManager {
     for (const request of this.store.requests(id)) if (!request.resolvedAt) this.store.saveRequest({ ...request, resolvedAt: Date.now(), resolution: "deny", resolvedBy: `${by} (mission stopped)` });
     this.workspace.releaseMission(id);
     this.inbox.resolve(id);
-    const stopped = this.setMission(this.store.mission(id), { state: "stopped", finishedAt: Date.now(), failure: { category: "user_stopped", detail: `Stopped by ${by}.`, stepId: null }, accounting: this.accounting(id) }, "mission.stopped", `Mission "${mission.title}" stopped by ${by}; child tasks stopped, nothing will be retried.`);
+    const cleanupFailures = this.store.runs({ missionId: id, limit: 500 }).filter((run) => activeRuns.has(run.id) && run.cleanup?.ok === false);
+    const cleanupDetail = cleanupFailures.length ? ` Cleanup needs attention: ${cleanupFailures.map((run) => run.cleanup!.detail).join(" ")}` : " Active capability cleanup finished.";
+    const stopped = this.setMission(this.store.mission(id), { state: "stopped", finishedAt: Date.now(), failure: { category: "user_stopped", detail: `Stopped by ${by}.${cleanupDetail}`, stepId: null }, accounting: this.accounting(id) }, "mission.stopped", `Mission "${mission.title}" stopped by ${by}; child tasks stopped, nothing will be retried.${cleanupDetail}`);
     return this.view(stopped);
+    } finally { this.stopping.delete(id); }
   }
   retry(id: string, by: string): MissionView {
     this.requireEnabled();
@@ -664,7 +689,7 @@ export class MissionManager {
     for (const step of this.store.steps(id)) if (step.state === "blocked") this.setStep(step, { state: "pending", failure: null });
     if (mission.state === "failed") mission = this.setMission(mission, { state: "ready", failure: null, finishedAt: null }, "mission.retry", `${by} retried ${failed.length} failed step(s).`);
     if (mission.state === "ready") mission = this.start(mission);
-    else { mission = this.setMission(mission, { state: "running", failure: null }, "mission.retry", `${by} retried ${failed.length} failed step(s).`); this.schedule(id); }
+    else { this.bus.clearCancellation(id); mission = this.setMission(mission, { state: "running", failure: null }, "mission.retry", `${by} retried ${failed.length} failed step(s).`); this.schedule(id); }
     return this.view(mission);
   }
   async replan(id: string, by: string, explicit?: unknown, objective?: string): Promise<MissionView> {
